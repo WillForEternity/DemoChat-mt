@@ -1,0 +1,480 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.145 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.145 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.396 0.141 25.723);
+  --destructive-foreground: oklch(0.637 0.237 25.331);
+  --border: oklch(0.269 0 0);
+  --input: oklch(0.269 0 0);
+  --ring: oklch(0.439 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(0.269 0 0);
+  --sidebar-ring: oklch(0.439 0 0);
+}
+
+@theme inline {
+  --font-sans: 'Geist', 'Geist Fallback';
+  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  
+  /* KaTeX / LaTeX math rendering - dark mode support */
+  .dark .katex {
+    color: #e5e5e5; /* neutral-200 - readable on dark backgrounds */
+  }
+  
+  /* Ensure math elements don't overflow containers */
+  .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.5rem 0;
+  }
+  
+  /* Style the KaTeX error messages */
+  .katex-error {
+    color: #ef4444; /* red-500 */
+  }
+  
+  /* Thin scrollbar styles for all browsers */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(209 213 219) transparent;
+  }
+  
+  .dark * {
+    scrollbar-color: rgb(64 64 64) transparent;
+  }
+  
+  /* Webkit browsers (Chrome, Safari, Edge) */
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  *::-webkit-scrollbar-thumb {
+    background-color: rgb(209 213 219);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(156 163 175);
+  }
+  
+  .dark *::-webkit-scrollbar-thumb {
+    background-color: rgb(64 64 64);
+  }
+  
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(82 82 82);
+  }
+}
+
+/* =============================================================================
+   NEUMORPHIC BUTTON STYLES
+   A beautiful soft UI button effect with light/shadow interplay
+   
+   IMPORTANT: For neumorphic effect to work properly, buttons must match their
+   container background. Use --neu-bg CSS variable or context classes.
+   ============================================================================= */
+
+:root {
+  --neu-height: 1;
+  /* Default light mode - matches white/light gray backgrounds */
+  --neu-light: rgba(255, 255, 255, 0.9);
+  --neu-shadow: rgba(0, 0, 0, 0.15);
+  --neu-bg: #ffffff;
+}
+
+.dark {
+  /* Dark mode - matches dark backgrounds */
+  --neu-light: rgba(255, 255, 255, 0.08);
+  --neu-shadow: rgba(0, 0, 0, 0.5);
+  --neu-bg: #0a0a0a; /* neutral-950 */
+}
+
+/* =============================================================================
+   CONTEXT CLASSES - Apply to parent containers to set button background
+   ============================================================================= */
+
+/* For white backgrounds (main chat area in light mode) */
+.neu-context-white {
+  --neu-bg: #ffffff;
+  --neu-light: rgba(255, 255, 255, 1);
+  --neu-shadow: rgba(0, 0, 0, 0.12);
+}
+
+/* For light gray backgrounds (sidebar in light mode) */
+.neu-context-gray {
+  --neu-bg: #f9fafb; /* gray-50 */
+  --neu-light: rgba(255, 255, 255, 0.9);
+  --neu-shadow: rgba(0, 0, 0, 0.15);
+}
+
+/* For dark backgrounds (dark mode) */
+.neu-context-dark {
+  --neu-bg: #0a0a0a; /* neutral-950 */
+  --neu-light: rgba(255, 255, 255, 0.08);
+  --neu-shadow: rgba(0, 0, 0, 0.5);
+}
+
+/* For sidebar in dark mode */
+.dark .neu-context-gray {
+  --neu-bg: #0a0a0a; /* neutral-950 */
+  --neu-light: rgba(255, 255, 255, 0.06);
+  --neu-shadow: rgba(0, 0, 0, 0.6);
+}
+
+.dark .neu-context-white {
+  --neu-bg: #0a0a0a; /* neutral-950 */
+  --neu-light: rgba(255, 255, 255, 0.08);
+  --neu-shadow: rgba(0, 0, 0, 0.5);
+}
+
+/* =============================================================================
+   BASE NEUMORPHIC TILE
+   ============================================================================= */
+
+.neu-tile {
+  position: relative;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  border-radius: 0.75rem;
+}
+
+.neu-tile::before,
+.neu-tile::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* =============================================================================
+   RAISED BUTTON EFFECT
+   
+   Uses ::before for outset shadow, ::after for inset shadow.
+   Both are the same size (inset: 0) so visual boundaries stay consistent.
+   
+   Default: outset (raised) - ::before visible
+   Hover: level (flat) - both hidden
+   Active/Click: inset (pressed) - ::after visible, .neu-inner bg hidden
+   ============================================================================= */
+
+.neu-button {
+  --neu-offset: 0.2rem;
+  --neu-blur: 0.4rem;
+  
+  cursor: pointer;
+  position: relative;
+  background-color: var(--neu-bg);
+}
+
+/* Outset shadow layer (raised state) */
+.neu-button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-color: var(--neu-bg);
+  box-shadow: 
+    calc(var(--neu-offset) * var(--neu-height)) calc(var(--neu-offset) * var(--neu-height)) var(--neu-blur) var(--neu-shadow),
+    calc(var(--neu-offset) * var(--neu-height) * -1) calc(var(--neu-offset) * var(--neu-height) * -1) var(--neu-blur) var(--neu-light);
+  opacity: 1;
+  transition: opacity 0.15s ease-in-out;
+  pointer-events: none;
+}
+
+/* Inset shadow layer (pressed state) - no background, only shadow */
+.neu-button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-color: transparent;
+  box-shadow: 
+    inset calc(var(--neu-offset) * var(--neu-height)) calc(var(--neu-offset) * var(--neu-height)) var(--neu-blur) var(--neu-shadow),
+    inset calc(var(--neu-offset) * var(--neu-height) * -1) calc(var(--neu-offset) * var(--neu-height) * -1) var(--neu-blur) var(--neu-light);
+  opacity: 0;
+  transition: opacity 0.15s ease-in-out;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.neu-button > .neu-inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: inherit;
+  align-items: inherit;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background-color: var(--neu-bg);
+  transition: background-color 0.15s ease-in-out;
+}
+
+.neu-button .neu-content {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: inherit;
+  width: 100%;
+  gap: inherit;
+}
+
+/* Hover state - level (flat) - outset shadow hidden */
+.neu-button:hover:not(:disabled)::before {
+  opacity: 0;
+}
+
+/* Active/Click state - outset hidden, inset visible, inner bg transparent */
+.neu-button:active:not(:disabled)::before,
+.neu-button:hover:active:not(:disabled)::before {
+  opacity: 0 !important;
+}
+
+.neu-button:active:not(:disabled)::after,
+.neu-button:hover:active:not(:disabled)::after {
+  opacity: 1 !important;
+}
+
+.neu-button:active:not(:disabled) > .neu-inner,
+.neu-button:hover:active:not(:disabled) > .neu-inner {
+  background-color: transparent !important;
+}
+
+/* Disabled state */
+.neu-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Circle variant */
+.neu-button.neu-circle {
+  border-radius: 50%;
+}
+
+/* =============================================================================
+   ROUND BUTTON
+   
+   Since round button doesn't have .neu-inner, we apply shadows directly
+   and transition between outset, flat, and inset states.
+   ============================================================================= */
+
+.neu-round-button {
+  --neu-offset: 0.2rem;
+  --neu-blur: 0.4rem;
+  
+  cursor: pointer;
+  border-radius: 50%;
+  position: relative;
+  background-color: var(--neu-bg);
+  box-shadow: 
+    calc(var(--neu-offset) * var(--neu-height)) calc(var(--neu-offset) * var(--neu-height)) var(--neu-blur) var(--neu-shadow),
+    calc(var(--neu-offset) * var(--neu-height) * -1) calc(var(--neu-offset) * var(--neu-height) * -1) var(--neu-blur) var(--neu-light);
+  transition: box-shadow 0.15s ease-in-out;
+}
+
+.neu-round-button .neu-content {
+  position: relative;
+  z-index: 1;
+}
+
+/* Hover state - level (flat) */
+.neu-round-button:hover:not(:disabled) {
+  box-shadow: none;
+}
+
+/* Active/Click state - inset */
+.neu-round-button:active:not(:disabled),
+.neu-round-button:hover:active:not(:disabled) {
+  box-shadow: 
+    inset calc(var(--neu-offset) * var(--neu-height)) calc(var(--neu-offset) * var(--neu-height)) var(--neu-blur) var(--neu-shadow),
+    inset calc(var(--neu-offset) * var(--neu-height) * -1) calc(var(--neu-offset) * var(--neu-height) * -1) var(--neu-blur) var(--neu-light) !important;
+}
+
+.neu-round-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* =============================================================================
+   COLOR ACCENT VARIANTS
+   
+   Color variants only change the text/icon color, keeping the neumorphic
+   background consistent with the container. All variants use the same
+   shadow intensity for visual consistency.
+   ============================================================================= */
+
+/* Primary - emphasized text */
+.neu-button.neu-primary .neu-content {
+  color: #1f2937; /* gray-800 */
+  font-weight: 500;
+}
+
+.dark .neu-button.neu-primary .neu-content {
+  color: #f3f4f6; /* gray-100 */
+}
+
+/* Destructive - red text */
+.neu-button.neu-destructive .neu-content {
+  color: #dc2626; /* red-600 */
+  font-weight: 500;
+}
+
+.dark .neu-button.neu-destructive .neu-content {
+  color: #f87171; /* red-400 */
+}
+
+/* Secondary - muted text */
+.neu-button.neu-secondary .neu-content {
+  color: #4b5563; /* gray-600 */
+}
+
+.dark .neu-button.neu-secondary .neu-content {
+  color: #9ca3af; /* gray-400 */
+}
+
+/* Success - green text */
+.neu-button.neu-success .neu-content {
+  color: #16a34a; /* green-600 */
+  font-weight: 500;
+}
+
+.dark .neu-button.neu-success .neu-content {
+  color: #4ade80; /* green-400 */
+}
+
+/* =============================================================================
+   NEUMORPHIC OUTSET CONTAINER (for user messages, cards, etc.)
+   
+   Creates a raised appearance - same as the button's default state.
+   ============================================================================= */
+
+.neu-outset {
+  --neu-offset: 0.2rem;
+  --neu-blur: 0.4rem;
+  
+  position: relative;
+  background-color: var(--neu-bg);
+  box-shadow: 
+    calc(var(--neu-offset) * var(--neu-height)) calc(var(--neu-offset) * var(--neu-height)) var(--neu-blur) var(--neu-shadow),
+    calc(var(--neu-offset) * var(--neu-height) * -1) calc(var(--neu-offset) * var(--neu-height) * -1) var(--neu-blur) var(--neu-light);
+}

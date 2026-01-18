@@ -1,0 +1,128 @@
+/**
+ * EXAMPLE: Tool UI Component
+ *
+ * This file demonstrates how to create a custom UI component for your tools.
+ * Each tool can have a dedicated component that renders its state and output.
+ *
+ * HOW TO USE:
+ * -----------
+ * 1. Rename this file to match your tool (e.g., weather-view.tsx)
+ * 2. Update the component to match your tool's input/output types
+ * 3. Import it in ai-chat.tsx and add a case in renderToolInvocation
+ */
+
+"use client";
+
+import { Loader2, Cloud, Sun, CloudRain } from "lucide-react";
+
+/**
+ * Props type for the tool view.
+ * The invocation contains the tool's state, input, and output.
+ */
+/**
+ * Tool invocation states in AI SDK v6:
+ * - "input-streaming": Tool input is being streamed (tokens arriving)
+ * - "input-available": Tool input is complete, tool is executing
+ * - "output-available": Tool has finished with output
+ * - "output-error": Tool execution failed
+ */
+interface WeatherToolViewProps {
+  invocation: {
+    state: "input-streaming" | "input-available" | "output-available" | "output-error";
+    toolCallId: string;
+    input: {
+      city: string;
+      units?: "celsius" | "fahrenheit";
+    };
+    output?: {
+      state: "loading" | "ready";
+      city?: string;
+      temperature?: number;
+      units?: string;
+      condition?: string;
+      humidity?: number;
+      message?: string;
+    };
+  };
+}
+
+/**
+ * Weather Tool View Component
+ *
+ * Renders different UI based on the tool's execution state.
+ */
+export function WeatherToolView({ invocation }: WeatherToolViewProps) {
+  const { state, input, output } = invocation;
+
+  // Loading state - tool is being called or executing
+  if (state !== "output-available" || !output || output.state === "loading") {
+    return (
+      <div className="my-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
+        <div className="flex items-center gap-3">
+          <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+          <div>
+            <p className="font-medium text-blue-900">
+              Getting weather for {input.city}...
+            </p>
+            {output?.message && (
+              <p className="text-sm text-blue-700">{output.message}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Ready state - tool has output
+  const WeatherIcon =
+    output.condition === "sunny"
+      ? Sun
+      : output.condition === "rainy"
+        ? CloudRain
+        : Cloud;
+
+  return (
+    <div className="my-3 p-4 bg-gradient-to-br from-sky-50 to-blue-100 border border-sky-200 rounded-xl">
+      <div className="flex items-start gap-4">
+        <div className="p-3 bg-white rounded-full shadow-sm">
+          <WeatherIcon className="w-8 h-8 text-sky-600" />
+        </div>
+        <div className="flex-1">
+          <h3 className="font-semibold text-gray-900 text-lg">{output.city}</h3>
+          <div className="mt-1 flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-gray-900">
+              {output.temperature}°
+            </span>
+            <span className="text-gray-500 uppercase text-sm">
+              {output.units === "celsius" ? "C" : "F"}
+            </span>
+          </div>
+          <p className="mt-1 text-gray-600 capitalize">{output.condition}</p>
+          {output.humidity && (
+            <p className="text-sm text-gray-500">
+              Humidity: {output.humidity}%
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * HOW TO INTEGRATE IN ai-chat.tsx:
+ * --------------------------------
+ *
+ * 1. Import the component:
+ *    import { WeatherToolView } from "@/components/tools/weather-view";
+ *
+ * 2. Add a case in renderToolInvocation:
+ *
+ *    if (invocation.state === "output-available") {
+ *      switch (toolName) {
+ *        case "weather":
+ *          return <WeatherToolView key={index} invocation={invocation} />;
+ *        // Add more tools here...
+ *      }
+ *    }
+ */

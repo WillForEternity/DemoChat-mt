@@ -1,0 +1,135 @@
+/**
+ * EXAMPLE TOOL: Weather Information
+ *
+ * This is an example tool file showing all AI SDK v6 tool features.
+ * Rename this file to `weather.ts` and uncomment the import in `index.ts` to use it.
+ *
+ * This example demonstrates:
+ * - Basic tool structure with inputSchema
+ * - Generator function for streaming tool state
+ * - Tool lifecycle callbacks
+ * - Proper typing with Zod
+ */
+
+import { tool } from "ai";
+import { z } from "zod";
+
+/**
+ * Weather Information Tool
+ *
+ * Demonstrates a streaming tool that yields progress updates.
+ * The UI can show loading states while the tool executes.
+ */
+export const weatherTool = tool({
+  // Clear description helps the model know when to use this tool
+  description: "Get the current weather information for a city",
+
+  // Input schema using Zod - provides runtime validation and type inference
+  inputSchema: z.object({
+    city: z.string().describe("The city name to get weather for"),
+    units: z
+      .enum(["celsius", "fahrenheit"])
+      .optional()
+      .default("fahrenheit")
+      .describe("Temperature units"),
+  }),
+
+  // Input examples help the model understand expected formats (Anthropic-native)
+  inputExamples: [
+    { input: { city: "San Francisco" } },
+    { input: { city: "Tokyo", units: "celsius" } },
+  ],
+
+  // Generator function allows streaming intermediate states to the UI
+  async *execute({ city, units }) {
+    // Yield loading state - UI can show a spinner
+    yield {
+      state: "loading" as const,
+      message: `Fetching weather for ${city}...`,
+    };
+
+    // Simulate API call delay
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    // Generate mock weather data
+    const temperature = Math.floor(Math.random() * 30) + 50; // 50-80°F
+    const conditions = ["sunny", "cloudy", "partly cloudy", "rainy", "foggy"];
+    const condition = conditions[Math.floor(Math.random() * conditions.length)];
+
+    // Yield final result - UI shows the weather card
+    yield {
+      state: "ready" as const,
+      city,
+      temperature: units === "celsius" 
+        ? Math.round((temperature - 32) * 5 / 9) 
+        : temperature,
+      units,
+      condition,
+      humidity: Math.floor(Math.random() * 50) + 30,
+      updatedAt: new Date().toISOString(),
+    };
+  },
+
+  // Optional: Control what gets sent back to the model (save tokens)
+  // toModelOutput: async ({ input, output }) => ({
+  //   type: "text",
+  //   value: `Weather in ${input.city}: ${output.temperature}°, ${output.condition}`,
+  // }),
+
+  // Optional: Lifecycle callbacks for logging/debugging
+  onInputStart: () => {
+    console.log("[Weather Tool] Model starting to generate input...");
+  },
+  onInputDelta: ({ inputTextDelta }) => {
+    console.log("[Weather Tool] Input delta:", inputTextDelta);
+  },
+  onInputAvailable: ({ input }) => {
+    console.log("[Weather Tool] Full input received:", input);
+  },
+});
+
+/**
+ * EXAMPLE: Tool with Approval Required
+ *
+ * For sensitive operations, require user confirmation before execution.
+ */
+export const deleteFileTool = tool({
+  description: "Delete a file from the system",
+
+  inputSchema: z.object({
+    path: z.string().describe("The file path to delete"),
+  }),
+
+  // Static approval - always requires confirmation
+  needsApproval: true,
+
+  execute: async ({ path }) => {
+    // This would only run after user approves
+    console.log(`Would delete: ${path}`);
+    return { deleted: true, path };
+  },
+});
+
+/**
+ * EXAMPLE: Tool with Dynamic Approval
+ *
+ * Only require approval for dangerous operations.
+ */
+export const runCommandTool = tool({
+  description: "Run a shell command",
+
+  inputSchema: z.object({
+    command: z.string().describe("The shell command to execute"),
+  }),
+
+  // Dynamic approval - only for destructive commands
+  needsApproval: async ({ command }) => {
+    const dangerousPatterns = ["rm ", "delete", "drop", "truncate"];
+    return dangerousPatterns.some((p) => command.toLowerCase().includes(p));
+  },
+
+  execute: async ({ command }) => {
+    // Execute command logic here
+    return { output: `Executed: ${command}`, exitCode: 0 };
+  },
+});
