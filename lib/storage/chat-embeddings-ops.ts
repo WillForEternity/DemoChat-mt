@@ -7,7 +7,7 @@
  */
 
 import { UMAP } from "umap-js";
-import { embedTexts, embedQuery } from "@/knowledge/embeddings/embed-client";
+import { embedTexts } from "@/knowledge/embeddings/embed-client";
 import type { ChatConversation } from "@/lib/chat-types";
 import { chunkChatMessages, computeConversationContentHash } from "./chat-chunker";
 import {
@@ -32,22 +32,6 @@ async function sha256(text: string): Promise<string> {
   return Array.from(new Uint8Array(hash))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-/**
- * Cosine similarity between two vectors.
- */
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0,
-    normA = 0,
-    normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-  return denominator === 0 ? 0 : dot / denominator;
 }
 
 // =============================================================================
@@ -158,50 +142,32 @@ export async function deleteChatEmbeddings(conversationId: string): Promise<void
 }
 
 /**
- * Semantic search across all chat embeddings using cosine similarity.
+ * Hybrid search across all chat embeddings using lexical + semantic + RRF fusion.
+ * Supports optional reranking for improved accuracy.
  */
 export async function searchChatEmbeddings(
   query: string,
   topK: number = 5,
   threshold: number = 0.3
 ): Promise<ChatSearchResult[]> {
-  const db = await getChatEmbeddingsDb();
+  // Use the new hybrid search with reranking
+  const { chatHybridSearch } = await import("./chat-hybrid-search");
+  
+  const results = await chatHybridSearch(query, {
+    topK,
+    threshold,
+    rerank: true, // Auto-detect backend availability
+  });
 
-  // Embed the query
-  let queryEmbedding: number[];
-  try {
-    queryEmbedding = await embedQuery(query);
-  } catch (error) {
-    console.error("[ChatEmbedding] Failed to embed query:", error);
-    throw new Error("Failed to embed search query. Check that OPENAI_API_KEY is set.");
-  }
-
-  // Load all embeddings
-  const allEmbeddings = await db.getAll("embeddings");
-
-  if (allEmbeddings.length === 0) {
-    return [];
-  }
-
-  // Compute cosine similarity for each
-  const scored = allEmbeddings.map((e) => ({
-    ...e,
-    score: cosineSimilarity(queryEmbedding, e.embedding),
+  // Map to existing ChatSearchResult format for backward compatibility
+  return results.map((r) => ({
+    conversationId: r.conversationId,
+    conversationTitle: r.conversationTitle,
+    chunkText: r.chunkText,
+    messageRole: r.messageRole,
+    score: r.score,
+    chunkIndex: r.chunkIndex,
   }));
-
-  // Filter by threshold and sort by score
-  return scored
-    .filter((e) => e.score >= threshold)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-    .map((e) => ({
-      conversationId: e.conversationId,
-      conversationTitle: e.conversationTitle,
-      chunkText: e.chunkText,
-      messageRole: e.messageRole,
-      score: Math.round(e.score * 100) / 100,
-      chunkIndex: e.chunkIndex,
-    }));
 }
 
 // =============================================================================

@@ -102,16 +102,21 @@ Returns: Array of {filePath, chunkText, headingPath, score, matchedTerms}`,
 });
 
 export const chatSearchTool = tool({
-  description: `Semantic search across all CHAT HISTORY (past conversations).
-Returns relevant chunks from previous chats, ranked by similarity score (0-1).
+  description: `Hybrid search across all CHAT HISTORY using lexical (exact terms) AND semantic (meaning) matching.
+Returns relevant chunks from previous chats, ranked by combined score with optional reranking.
 
 NOTE: This searches past chat conversations. For searching the Knowledge Base (saved notes/docs), use kb_search instead.
+
+SEARCH MODES (automatically detected):
+- Exact queries ("error code", "useState", quoted phrases) → lexical-heavy
+- Questions ("What did we discuss about X?") → semantic-heavy
+- Mixed queries → balanced
 
 WHEN TO USE:
 - Finding previous discussions on a topic
 - Recalling past decisions or recommendations
+- Searching for specific terms, code, or error messages mentioned
 - Getting context from earlier conversations
-- Referencing what was said in past chats
 
 INTERPRETING SCORES:
 - 0.7+: High relevance - directly discusses the topic
@@ -119,9 +124,14 @@ INTERPRETING SCORES:
 - 0.3-0.5: Moderate relevance - tangentially related
 - <0.3: Not returned (filtered out)
 
-Returns: Array of {conversationTitle, chunkText, messageRole, score}`,
+QUERY TIPS:
+- For exact matches: use quotes ("JWT token") or code identifiers
+- For concepts: ask natural questions
+- For code/errors: use exact terms (ECONNREFUSED, useEffect)
+
+Returns: Array of {conversationTitle, chunkText, messageRole, score, matchedTerms}`,
   inputSchema: z.object({
-    query: z.string().describe("Search query - natural language question or topic"),
+    query: z.string().describe("Search query - natural language, exact terms, or quoted phrases"),
     topK: z.number().optional().describe("Number of results (default: 5, max: 25)"),
   }),
 });

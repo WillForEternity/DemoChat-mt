@@ -3878,12 +3878,13 @@ ${content}
             break;
           }
           case "kb_search": {
-            // Hybrid search (lexical + semantic) across knowledge base
+            // Hybrid search (lexical + semantic + RRF) across knowledge base with optional reranking
             const query = args.query as string;
             const topK = Math.min((args.topK as number) || 5, 25);
             const results = await kb.hybridSearch(query, { 
               topK, 
-              includeBreakdown: true 
+              includeBreakdown: true,
+              rerank: true, // Auto-detect reranker availability
             });
             
             if (results.length === 0) {
@@ -3893,13 +3894,14 @@ ${content}
               };
             } else {
               // XML-formatted output for better context engineering
-              // Include matched terms when available for transparency
+              // Include matched terms and rerank indicator for transparency
               const xmlOutput = `<search_results source="knowledge_base" query="${query}" mode="${results[0]?.queryType || 'mixed'}">
 ${results.map((r) => {
   const matchedTermsAttr = r.matchedTerms?.length > 0 
     ? ` matched_terms="${r.matchedTerms.join(', ')}"` 
     : '';
-  return `<result score="${r.score}" file="${r.filePath}" heading="${r.headingPath}"${matchedTermsAttr}>
+  const rerankedAttr = r.reranked ? ' reranked="true"' : '';
+  return `<result score="${r.score}" file="${r.filePath}" heading="${r.headingPath}"${matchedTermsAttr}${rerankedAttr}>
 <chunk_text>
 ${r.chunkText}
 </chunk_text>
@@ -3911,11 +3913,15 @@ ${r.chunkText}
             break;
           }
           case "chat_search": {
-            // Semantic search across chat history
-            const { searchChatEmbeddings } = await import("@/lib/storage/chat-embeddings-ops");
+            // Hybrid search across chat history (lexical + semantic + RRF)
+            const { chatHybridSearch } = await import("@/lib/storage/chat-hybrid-search");
             const query = args.query as string;
             const topK = Math.min((args.topK as number) || 5, 25);
-            const results = await searchChatEmbeddings(query, topK);
+            const results = await chatHybridSearch(query, { 
+              topK, 
+              includeBreakdown: true,
+              rerank: true,
+            });
             
             if (results.length === 0) {
               output = {
@@ -3923,10 +3929,15 @@ ${r.chunkText}
                 message: "No matching content found in chat history. Try a different query or there may not be relevant past conversations.",
               };
             } else {
-              // XML-formatted output clearly marked as from chat history
-              const xmlOutput = `<search_results source="chat_history" query="${query}">
+              // XML-formatted output with matched terms and query type
+              const queryType = results[0]?.queryType || "mixed";
+              const xmlOutput = `<search_results source="chat_history" query="${query}" mode="${queryType}">
 ${results.map((r) => {
-  return `<result score="${r.score}" conversation="${r.conversationTitle}" role="${r.messageRole}">
+  const matchedTermsAttr = r.matchedTerms && r.matchedTerms.length > 0 
+    ? ` matched_terms="${r.matchedTerms.join(', ')}"` 
+    : '';
+  const rerankedAttr = r.reranked ? ' reranked="true"' : '';
+  return `<result score="${r.score}" conversation="${r.conversationTitle}" role="${r.messageRole}"${matchedTermsAttr}${rerankedAttr}>
 <chunk_text>
 ${r.chunkText}
 </chunk_text>
@@ -3938,15 +3949,21 @@ ${r.chunkText}
             break;
           }
           case "document_search": {
-            // Semantic search across uploaded large documents
+            // Hybrid search across uploaded large documents (lexical + semantic + RRF)
             const { searchLargeDocuments, searchLargeDocument } = await import("@/knowledge/large-documents");
             const query = args.query as string;
             const topK = Math.min((args.topK as number) || 10, 25);
             const documentId = args.documentId as string | undefined;
             
+            const searchOptions = { 
+              topK, 
+              includeBreakdown: true,
+              rerank: true,
+            };
+            
             const results = documentId
-              ? await searchLargeDocument(documentId, query, topK)
-              : await searchLargeDocuments(query, topK);
+              ? await searchLargeDocument(documentId, query, searchOptions)
+              : await searchLargeDocuments(query, searchOptions);
             
             if (results.length === 0) {
               output = {
@@ -3954,10 +3971,15 @@ ${r.chunkText}
                 message: "No matching content found in uploaded documents. The user may need to upload a document first via the Large Documents section in the sidebar.",
               };
             } else {
-              // XML-formatted output clearly marked as from large documents
-              const xmlOutput = `<search_results source="large_documents" query="${query}">
+              // XML-formatted output with matched terms and query type
+              const queryType = results[0]?.queryType || "mixed";
+              const xmlOutput = `<search_results source="large_documents" query="${query}" mode="${queryType}">
 ${results.map((r) => {
-  return `<result score="${r.score}" document="${r.filename}" heading="${r.headingPath}">
+  const matchedTermsAttr = r.matchedTerms && r.matchedTerms.length > 0 
+    ? ` matched_terms="${r.matchedTerms.join(', ')}"` 
+    : '';
+  const rerankedAttr = r.reranked ? ' reranked="true"' : '';
+  return `<result score="${r.score}" document="${r.filename}" heading="${r.headingPath}"${matchedTermsAttr}${rerankedAttr}>
 <chunk_text>
 ${r.chunkText}
 </chunk_text>

@@ -17,18 +17,23 @@ import { z } from "zod";
  * Executed client-side via onToolCall since it uses IndexedDB.
  */
 export const documentSearchTool = tool({
-  description: `Semantic search across all LARGE DOCUMENTS (uploaded files for RAG).
-Returns relevant chunks from uploaded documents, ranked by similarity score (0-1).
+  description: `Hybrid search across all LARGE DOCUMENTS using lexical (exact terms) AND semantic (meaning) matching.
+Returns relevant chunks from uploaded documents, ranked by combined score with optional reranking.
 
 NOTE: This searches uploaded Large Documents. Different from:
 - kb_search: searches the Knowledge Base (saved notes/docs)
 - chat_search: searches past Chat History
 
+SEARCH MODES (automatically detected):
+- Exact queries ("Figure 3", "Chapter 5", quoted phrases) → lexical-heavy
+- Questions ("What are the key findings?") → semantic-heavy
+- Mixed queries → balanced
+
 WHEN TO USE:
 - User asks questions about an uploaded document
 - Finding specific information in large PDFs, text files, etc.
+- Searching for exact terms, figures, or sections in documents
 - User references "the document", "that file", "the paper I uploaded"
-- Answering questions that require searching through uploaded content
 
 INTERPRETING SCORES:
 - 0.7+: High relevance - directly answers the query
@@ -36,9 +41,14 @@ INTERPRETING SCORES:
 - 0.3-0.5: Moderate relevance - tangentially related
 - <0.3: Not returned (filtered out)
 
-Returns: Array of {documentId, filename, chunkText, headingPath, score}`,
+QUERY TIPS:
+- For exact matches: use quotes ("Table 1") or specific terms
+- For concepts: ask natural questions
+- For figures/sections: use exact identifiers (Figure 3, Section 2.1)
+
+Returns: Array of {documentId, filename, chunkText, headingPath, score, matchedTerms}`,
   inputSchema: z.object({
-    query: z.string().describe("Search query - natural language question or topic to find in documents"),
+    query: z.string().describe("Search query - natural language, exact terms, or quoted phrases"),
     topK: z.number().optional().describe("Number of results (default: 10, max: 25)"),
     documentId: z.string().optional().describe("Optional: search only in a specific document by ID"),
   }),

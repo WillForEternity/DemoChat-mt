@@ -56,7 +56,7 @@ export interface LargeDocumentChunk {
 }
 
 /**
- * Search result from large document semantic search.
+ * Search result from large document hybrid search.
  */
 export interface LargeDocumentSearchResult {
   /** Document ID */
@@ -67,10 +67,16 @@ export interface LargeDocumentSearchResult {
   chunkText: string;
   /** Heading path for context */
   headingPath: string;
-  /** Similarity score (0-1) */
+  /** Relevance score (0-1), may be from embedding similarity or reranker */
   score: number;
   /** Chunk index for reference */
   chunkIndex: number;
+  /** Whether this result was reranked by a cross-encoder */
+  reranked?: boolean;
+  /** Terms that matched in lexical search (if includeBreakdown enabled) */
+  matchedTerms?: string[];
+  /** Detected query type (if includeBreakdown enabled) */
+  queryType?: "exact" | "semantic" | "mixed";
 }
 
 /**

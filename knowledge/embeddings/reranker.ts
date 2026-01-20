@@ -10,10 +10,13 @@
  * - Reduces hallucinations by up to 35%
  * - Use after initial retrieval (retrieve top-50, rerank to top-5)
  *
- * Supported backends:
- * - Cohere Rerank API (managed, high quality)
- * - OpenAI-based (uses GPT for reranking - expensive but effective)
- * - None (skip reranking for low-latency use cases)
+ * Supported backends (auto-selected based on available API keys):
+ * 1. Cohere Rerank API - Best quality, purpose-built ($2/1000 searches)
+ * 2. OpenAI GPT-4o-mini - Default fallback, uses existing OpenAI key
+ * 3. None - Skip reranking (if no API keys available)
+ *
+ * Default behavior: If user has OpenAI key (required for embeddings),
+ * reranking will automatically use GPT-4o-mini unless Cohere key is provided.
  */
 
 import { getApiKeys } from "@/lib/api-keys";
@@ -68,7 +71,7 @@ const DEFAULT_CONFIG: RerankerConfig = {
   backend: "none",
   cohereModel: "rerank-v3.5",
   topK: 5,
-  threshold: 0.0,
+  threshold: 0.2, // Filter out results below 20% relevance
 };
 
 /**
@@ -266,12 +269,17 @@ async function scoreWithGPT(
       messages: [
         {
           role: "system",
-          content: `You are a relevance scoring system. Given a query and a document, output ONLY a single number from 0 to 1 representing how relevant the document is to answering the query.
-0 = completely irrelevant
-0.5 = somewhat relevant
-1 = highly relevant, directly answers the query
+          content: `You are a relevance scoring system. Given a query and a document, output ONLY a decimal number from 0.00 to 1.00 representing how relevant the document is to answering the query.
 
-Output only the number, nothing else.`,
+Use the FULL continuous scale with fine-grained precision:
+- 0.95-1.00: Perfect match, directly and completely answers the query
+- 0.80-0.94: Highly relevant, contains the answer with minor gaps
+- 0.60-0.79: Good relevance, addresses the topic with useful information
+- 0.40-0.59: Moderate relevance, tangentially related content
+- 0.20-0.39: Low relevance, mentions related concepts but doesn't help
+- 0.00-0.19: Irrelevant, no meaningful connection to the query
+
+Output ONLY a decimal number like 0.73 or 0.42. Use two decimal places. No other text.`,
         },
         {
           role: "user",
@@ -281,7 +289,7 @@ Document: ${truncatedDoc}`,
         },
       ],
       max_tokens: 10,
-      temperature: 0,
+      temperature: 0.1, // Slight temperature for more nuanced scoring
     }),
   });
 
@@ -334,6 +342,11 @@ export function isRerankingAvailable(): {
 
 /**
  * Get recommended reranker based on available keys.
+ * 
+ * Priority:
+ * 1. Cohere (purpose-built, fastest, most cost-effective for reranking)
+ * 2. OpenAI (uses GPT-4o-mini as LLM-reranker, leverages existing key)
+ * 3. None (fallback if no keys available)
  */
 export function getRecommendedReranker(): RerankerConfig["backend"] {
   const available = isRerankingAvailable();

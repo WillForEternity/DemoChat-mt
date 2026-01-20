@@ -4,17 +4,55 @@
  * Core operations for uploading, indexing, and searching large documents.
  * Uses the same embedding infrastructure as the knowledge base but stores
  * documents in a separate database optimized for large file handling.
+ *
+ * 2025 Best Practices Applied:
+ * - Chunk size: 512 tokens (optimal for fact-focused Q&A retrieval)
+ * - Chunk overlap: 75 tokens (~15%, NVIDIA benchmark optimal)
+ * - Optional reranking: Cross-encoder reranking for 20-40% accuracy boost
+ * - Hybrid search with RRF fusion for better precision/recall balance
  */
 
-import { getLargeDocumentsDb } from "./idb";
-import { chunkMarkdown } from "../embeddings/chunker";
+import { getLargeDocumentsDb, removeDocumentUmapCache } from "./idb";
+import { chunkMarkdown, type ChunkOptions } from "../embeddings/chunker";
 import { embedTexts, embedQuery } from "../embeddings/embed-client";
+import { rerank, getRecommendedReranker, type RerankDocument, type RerankerConfig } from "../embeddings/reranker";
+import { largeDocLexicalSearch, detectQueryType, type LargeDocLexicalResult } from "./lexical-search";
 import type {
   LargeDocumentMetadata,
   LargeDocumentChunk,
   LargeDocumentSearchResult,
   IndexingProgress,
 } from "./types";
+
+/**
+ * Default chunking options for large documents.
+ * Optimized for document Q&A use cases.
+ */
+const DEFAULT_CHUNK_OPTIONS: ChunkOptions = {
+  maxTokens: 512,      // Optimal for fact-focused retrieval
+  overlapTokens: 75,   // ~15% overlap for context continuity
+  minTokens: 50,       // Minimum chunk size
+};
+
+/**
+ * Search options for large documents.
+ */
+export interface LargeDocumentSearchOptions {
+  /** Number of results to return (default: 10) */
+  topK?: number;
+  /** Minimum similarity threshold (default: 0.3) */
+  threshold?: number;
+  /** Enable reranking for better accuracy (default: auto-detect) */
+  rerank?: boolean;
+  /** Reranker backend to use */
+  rerankerBackend?: RerankerConfig["backend"];
+  /** Number of candidates to retrieve before reranking (default: 50) */
+  retrieveK?: number;
+  /** Include matched terms in results */
+  includeBreakdown?: boolean;
+  /** RRF smoothing constant k (default: 60) */
+  rrfK?: number;
+}
 
 /**
  * Generate a UUID for document IDs.
@@ -141,8 +179,10 @@ export async function uploadLargeDocument(
       message: "Splitting into chunks...",
     });
 
-    // Chunk the content (use larger chunks for large docs - 800 tokens)
-    const chunks = chunkMarkdown(content, 800);
+    // Chunk the content with optimized settings for document Q&A
+    // - 512 tokens: optimal for fact-focused retrieval
+    // - 75 token overlap: prevents context loss at boundaries
+    const chunks = chunkMarkdown(content, DEFAULT_CHUNK_OPTIONS);
 
     if (chunks.length === 0) {
       throw new Error("Document produced no chunks. It may be empty.");
@@ -272,6 +312,9 @@ export async function deleteLargeDocument(documentId: string): Promise<void> {
 
   // Delete the document metadata
   await db.delete("documents", documentId);
+
+  // Remove cached UMAP projection for this document
+  await removeDocumentUmapCache(documentId);
 }
 
 /**
@@ -314,15 +357,57 @@ export async function getLargeDocument(
 }
 
 /**
- * Search across all large documents using semantic search.
+ * Compute RRF score from ranks.
+ * RRF(d) = Σ 1/(k + rank(d))
+ */
+function computeRRFScore(
+  semanticRank: number | null,
+  lexicalRank: number | null,
+  k: number = 60
+): number {
+  let score = 0;
+  if (semanticRank !== null) {
+    score += 1 / (k + semanticRank);
+  }
+  if (lexicalRank !== null) {
+    score += 1 / (k + lexicalRank);
+  }
+  return score;
+}
+
+/**
+ * Search across all large documents using hybrid search (lexical + semantic + RRF).
  *
  * This is the core RAG search function that Claude will use.
+ *
+ * Pipeline:
+ * 1. Run lexical search → ranked list
+ * 2. Run semantic search → ranked list  
+ * 3. Compute RRF fusion scores
+ * 4. (Optional) Rerank top candidates with cross-encoder for better accuracy
+ * 5. Return final results with matched terms
  */
 export async function searchLargeDocuments(
   query: string,
-  topK: number = 10,
+  topKOrOptions: number | LargeDocumentSearchOptions = 10,
   threshold: number = 0.3
 ): Promise<LargeDocumentSearchResult[]> {
+  // Support both legacy (topK, threshold) and new (options) signatures
+  const options: LargeDocumentSearchOptions =
+    typeof topKOrOptions === "number"
+      ? { topK: topKOrOptions, threshold }
+      : topKOrOptions;
+
+  const {
+    topK = 10,
+    threshold: minThreshold = 0.3,
+    rerank: enableRerank,
+    rerankerBackend,
+    retrieveK = 50, // Retrieve more candidates when reranking
+    includeBreakdown = false,
+    rrfK = 60,
+  } = options;
+
   const db = await getLargeDocumentsDb();
 
   // Get all chunks
@@ -339,50 +424,198 @@ export async function searchLargeDocuments(
     docMap.set(doc.id, doc);
   }
 
+  // Detect query type
+  const queryType = detectQueryType(query);
+
+  // Run lexical search
+  const lexicalResults = largeDocLexicalSearch(query, allChunks);
+  const lexicalRanks = new Map<string, number>();
+  const lexicalScoresMap = new Map<string, LargeDocLexicalResult>();
+  lexicalResults.forEach((result, index) => {
+    lexicalRanks.set(result.chunk.id, index + 1); // 1-indexed rank
+    lexicalScoresMap.set(result.chunk.id, result);
+  });
+
   // Embed the query
   let queryEmbedding: number[];
   try {
     queryEmbedding = await embedQuery(query);
   } catch (error) {
     console.error("[LargeDocs] Failed to embed query:", error);
-    throw new Error("Failed to embed search query. Check API key configuration.");
-  }
-
-  // Compute cosine similarity for each chunk
-  const scored = allChunks.map((chunk) => ({
-    chunk,
-    score: cosineSimilarity(queryEmbedding, chunk.embedding),
-  }));
-
-  // Filter by threshold, sort by score, and take top K
-  const results = scored
-    .filter((s) => s.score >= threshold)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-    .map((s) => {
-      const doc = docMap.get(s.chunk.documentId);
+    // Fall back to lexical-only if embedding fails
+    return lexicalResults.slice(0, topK).map((r) => {
+      const doc = docMap.get(r.chunk.documentId);
       return {
-        documentId: s.chunk.documentId,
+        documentId: r.chunk.documentId,
         filename: doc?.filename || "Unknown Document",
-        chunkText: s.chunk.chunkText,
-        headingPath: s.chunk.headingPath,
-        score: Math.round(s.score * 100) / 100, // Round to 2 decimals
-        chunkIndex: s.chunk.chunkIndex,
+        chunkText: r.chunk.chunkText,
+        headingPath: r.chunk.headingPath,
+        score: r.lexicalScore,
+        chunkIndex: r.chunk.chunkIndex,
+        matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
+        queryType: includeBreakdown ? queryType : undefined,
       };
     });
+  }
 
-  return results;
+  // Compute semantic scores and create ranked list
+  const semanticScored: Array<{ chunk: LargeDocumentChunk; score: number }> = [];
+  for (const chunk of allChunks) {
+    const similarity = cosineSimilarity(queryEmbedding, chunk.embedding);
+    semanticScored.push({ chunk, score: similarity });
+  }
+
+  // Sort by semantic score to get ranks
+  semanticScored.sort((a, b) => b.score - a.score);
+
+  const semanticRanks = new Map<string, number>();
+  const rawSemanticScores = new Map<string, number>();
+  semanticScored.forEach((item, index) => {
+    semanticRanks.set(item.chunk.id, index + 1); // 1-indexed rank
+    rawSemanticScores.set(item.chunk.id, item.score);
+  });
+
+  // Combine using RRF
+  const combinedResults: Array<{
+    chunk: LargeDocumentChunk;
+    rrfScore: number;
+    semanticScore: number;
+    lexicalScore: number;
+    matchedTerms: string[];
+  }> = [];
+
+  for (const chunk of allChunks) {
+    const id = chunk.id;
+    const semanticRank = semanticRanks.get(id) ?? null;
+    const lexicalRank = lexicalRanks.get(id) ?? null;
+    const semanticScore = rawSemanticScores.get(id) ?? 0;
+    const lexicalResult = lexicalScoresMap.get(id);
+    const lexicalScore = lexicalResult?.lexicalScore ?? 0;
+    const matchedTerms = lexicalResult?.matchedTerms ?? [];
+
+    const rrfScore = computeRRFScore(semanticRank, lexicalRank, rrfK);
+
+    combinedResults.push({
+      chunk,
+      rrfScore,
+      semanticScore,
+      lexicalScore,
+      matchedTerms,
+    });
+  }
+
+  // Sort by RRF score
+  combinedResults.sort((a, b) => b.rrfScore - a.rrfScore);
+
+  // Determine if we should rerank
+  const shouldRerank = enableRerank ?? (getRecommendedReranker() !== "none");
+  const candidateCount = shouldRerank ? retrieveK : topK;
+
+  // Get candidates
+  const candidates = combinedResults.slice(0, candidateCount);
+
+  // Filter by semantic threshold
+  const filtered = candidates.filter((r) => r.semanticScore >= minThreshold);
+
+  if (filtered.length === 0) {
+    return [];
+  }
+
+  // Apply reranking if enabled
+  if (shouldRerank && filtered.length > 1) {
+    const rerankDocs: RerankDocument[] = filtered.map((r) => ({
+      id: r.chunk.id,
+      text: r.chunk.chunkText,
+      originalScore: r.rrfScore,
+      metadata: {
+        documentId: r.chunk.documentId,
+        chunkIndex: r.chunk.chunkIndex,
+        headingPath: r.chunk.headingPath,
+        semanticScore: r.semanticScore,
+        lexicalScore: r.lexicalScore,
+        matchedTerms: r.matchedTerms,
+      },
+    }));
+
+    try {
+      const reranked = await rerank(query, rerankDocs, {
+        backend: rerankerBackend ?? getRecommendedReranker(),
+        topK,
+      });
+
+      // Build results from reranked list
+      return reranked.map((r) => {
+        const meta = r.metadata as {
+          documentId: string;
+          chunkIndex: number;
+          headingPath: string;
+          semanticScore: number;
+          lexicalScore: number;
+          matchedTerms: string[];
+        };
+        const doc = docMap.get(meta.documentId);
+        return {
+          documentId: meta.documentId,
+          filename: doc?.filename || "Unknown Document",
+          chunkText: r.text,
+          headingPath: meta.headingPath,
+          score: Math.round(r.relevanceScore * 100) / 100,
+          chunkIndex: meta.chunkIndex,
+          reranked: true,
+          matchedTerms: includeBreakdown ? meta.matchedTerms : undefined,
+          queryType: includeBreakdown ? queryType : undefined,
+        };
+      });
+    } catch (error) {
+      console.error("[LargeDocs] Reranking failed, falling back to RRF scores:", error);
+      // Fall through to non-reranked results
+    }
+  }
+
+  // Return results without reranking (take topK)
+  const finalResults = filtered.slice(0, topK);
+
+  return finalResults.map((r) => {
+    const doc = docMap.get(r.chunk.documentId);
+    return {
+      documentId: r.chunk.documentId,
+      filename: doc?.filename || "Unknown Document",
+      chunkText: r.chunk.chunkText,
+      headingPath: r.chunk.headingPath,
+      score: Math.round(r.semanticScore * 100) / 100,
+      chunkIndex: r.chunk.chunkIndex,
+      reranked: false,
+      matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
+      queryType: includeBreakdown ? queryType : undefined,
+    };
+  });
 }
 
 /**
- * Search a specific document only.
+ * Search a specific document only using hybrid search.
  */
 export async function searchLargeDocument(
   documentId: string,
   query: string,
-  topK: number = 10,
+  topKOrOptions: number | LargeDocumentSearchOptions = 10,
   threshold: number = 0.3
 ): Promise<LargeDocumentSearchResult[]> {
+  // Support both legacy and new signatures
+  const options: LargeDocumentSearchOptions =
+    typeof topKOrOptions === "number"
+      ? { topK: topKOrOptions, threshold }
+      : topKOrOptions;
+
+  const {
+    topK = 10,
+    threshold: minThreshold = 0.3,
+    rerank: enableRerank,
+    rerankerBackend,
+    retrieveK = 50,
+    includeBreakdown = false,
+    rrfK = 60,
+  } = options;
+
   const db = await getLargeDocumentsDb();
 
   // Get chunks for this document only
@@ -395,34 +628,153 @@ export async function searchLargeDocument(
   // Get document metadata
   const doc = await db.get("documents", documentId);
 
+  // Detect query type
+  const queryType = detectQueryType(query);
+
+  // Run lexical search on this document's chunks
+  const lexicalResults = largeDocLexicalSearch(query, chunks);
+  const lexicalRanks = new Map<string, number>();
+  const lexicalScoresMap = new Map<string, LargeDocLexicalResult>();
+  lexicalResults.forEach((result, index) => {
+    lexicalRanks.set(result.chunk.id, index + 1);
+    lexicalScoresMap.set(result.chunk.id, result);
+  });
+
   // Embed the query
   let queryEmbedding: number[];
   try {
     queryEmbedding = await embedQuery(query);
   } catch (error) {
     console.error("[LargeDocs] Failed to embed query:", error);
-    throw new Error("Failed to embed search query. Check API key configuration.");
+    // Fall back to lexical-only
+    return lexicalResults.slice(0, topK).map((r) => ({
+      documentId,
+      filename: doc?.filename || "Unknown Document",
+      chunkText: r.chunk.chunkText,
+      headingPath: r.chunk.headingPath,
+      score: r.lexicalScore,
+      chunkIndex: r.chunk.chunkIndex,
+      matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
+      queryType: includeBreakdown ? queryType : undefined,
+    }));
   }
 
-  // Compute cosine similarity for each chunk
-  const scored = chunks.map((chunk) => ({
-    chunk,
-    score: cosineSimilarity(queryEmbedding, chunk.embedding),
-  }));
+  // Compute semantic scores and ranks
+  const semanticScored: Array<{ chunk: LargeDocumentChunk; score: number }> = [];
+  for (const chunk of chunks) {
+    const similarity = cosineSimilarity(queryEmbedding, chunk.embedding);
+    semanticScored.push({ chunk, score: similarity });
+  }
+  semanticScored.sort((a, b) => b.score - a.score);
 
-  // Filter by threshold, sort by score, and take top K
-  return scored
-    .filter((s) => s.score >= threshold)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-    .map((s) => ({
-      documentId: s.chunk.documentId,
-      filename: doc?.filename || "Unknown Document",
-      chunkText: s.chunk.chunkText,
-      headingPath: s.chunk.headingPath,
-      score: Math.round(s.score * 100) / 100,
-      chunkIndex: s.chunk.chunkIndex,
+  const semanticRanks = new Map<string, number>();
+  const rawSemanticScores = new Map<string, number>();
+  semanticScored.forEach((item, index) => {
+    semanticRanks.set(item.chunk.id, index + 1);
+    rawSemanticScores.set(item.chunk.id, item.score);
+  });
+
+  // Combine using RRF
+  const combinedResults: Array<{
+    chunk: LargeDocumentChunk;
+    rrfScore: number;
+    semanticScore: number;
+    lexicalScore: number;
+    matchedTerms: string[];
+  }> = [];
+
+  for (const chunk of chunks) {
+    const id = chunk.id;
+    const semanticRank = semanticRanks.get(id) ?? null;
+    const lexicalRank = lexicalRanks.get(id) ?? null;
+    const semanticScore = rawSemanticScores.get(id) ?? 0;
+    const lexicalResult = lexicalScoresMap.get(id);
+    const lexicalScore = lexicalResult?.lexicalScore ?? 0;
+    const matchedTerms = lexicalResult?.matchedTerms ?? [];
+
+    const rrfScore = computeRRFScore(semanticRank, lexicalRank, rrfK);
+
+    combinedResults.push({
+      chunk,
+      rrfScore,
+      semanticScore,
+      lexicalScore,
+      matchedTerms,
+    });
+  }
+
+  // Sort by RRF score
+  combinedResults.sort((a, b) => b.rrfScore - a.rrfScore);
+
+  // Determine if we should rerank
+  const shouldRerank = enableRerank ?? (getRecommendedReranker() !== "none");
+  const candidateCount = shouldRerank ? retrieveK : topK;
+  const candidates = combinedResults.slice(0, candidateCount);
+
+  // Filter by semantic threshold
+  const filtered = candidates.filter((r) => r.semanticScore >= minThreshold);
+
+  if (filtered.length === 0) {
+    return [];
+  }
+
+  // Apply reranking if enabled
+  if (shouldRerank && filtered.length > 1) {
+    const rerankDocs: RerankDocument[] = filtered.map((r) => ({
+      id: r.chunk.id,
+      text: r.chunk.chunkText,
+      originalScore: r.rrfScore,
+      metadata: {
+        chunkIndex: r.chunk.chunkIndex,
+        headingPath: r.chunk.headingPath,
+        semanticScore: r.semanticScore,
+        lexicalScore: r.lexicalScore,
+        matchedTerms: r.matchedTerms,
+      },
     }));
+
+    try {
+      const reranked = await rerank(query, rerankDocs, {
+        backend: rerankerBackend ?? getRecommendedReranker(),
+        topK,
+      });
+
+      return reranked.map((r) => {
+        const meta = r.metadata as {
+          chunkIndex: number;
+          headingPath: string;
+          matchedTerms: string[];
+        };
+        return {
+          documentId,
+          filename: doc?.filename || "Unknown Document",
+          chunkText: r.text,
+          headingPath: meta.headingPath,
+          score: Math.round(r.relevanceScore * 100) / 100,
+          chunkIndex: meta.chunkIndex,
+          reranked: true,
+          matchedTerms: includeBreakdown ? meta.matchedTerms : undefined,
+          queryType: includeBreakdown ? queryType : undefined,
+        };
+      });
+    } catch (error) {
+      console.error("[LargeDocs] Reranking failed:", error);
+      // Fall through to non-reranked results
+    }
+  }
+
+  // Return results without reranking
+  return filtered.slice(0, topK).map((r) => ({
+    documentId,
+    filename: doc?.filename || "Unknown Document",
+    chunkText: r.chunk.chunkText,
+    headingPath: r.chunk.headingPath,
+    score: Math.round(r.semanticScore * 100) / 100,
+    chunkIndex: r.chunk.chunkIndex,
+    reranked: false,
+    matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
+    queryType: includeBreakdown ? queryType : undefined,
+  }));
 }
 
 /**

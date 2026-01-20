@@ -7,8 +7,9 @@
 
 "use client";
 
-import React from "react";
+import React, { useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
+import { ChunkViewerModal, type ChunkData } from "./chunk-viewer-modal";
 import {
   IoFolderOpen,
   IoDocument,
@@ -319,26 +320,8 @@ interface SearchResultItem {
   lexicalScore?: number;
   matchedTerms?: string[];
   queryType?: "exact" | "semantic" | "mixed";
+  reranked?: boolean;
 }
-
-// Query type badge configuration
-const queryTypeConfig = {
-  exact: {
-    label: "Exact",
-    color: "text-gray-600 bg-gray-100 dark:bg-neutral-700/50 dark:text-neutral-300",
-    description: "Term matching prioritized",
-  },
-  semantic: {
-    label: "Semantic",
-    color: "text-gray-600 bg-gray-100 dark:bg-neutral-700/50 dark:text-neutral-300",
-    description: "Meaning-based search",
-  },
-  mixed: {
-    label: "Hybrid",
-    color: "text-gray-600 bg-gray-100 dark:bg-neutral-700/50 dark:text-neutral-300",
-    description: "Balanced search",
-  },
-};
 
 function SearchResult({
   query,
@@ -348,8 +331,33 @@ function SearchResult({
   results: SearchResultItem[];
 }) {
   const isEmpty = !results || results.length === 0;
-  const queryType = results[0]?.queryType || "mixed";
-  const typeConfig = queryTypeConfig[queryType];
+  
+  // Modal state for viewing full chunk
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  
+  const handleOpenChunk = useCallback((index: number) => {
+    setSelectedIndex(index);
+  }, []);
+  
+  const handleCloseModal = useCallback(() => {
+    setSelectedIndex(null);
+  }, []);
+  
+  const handleNavigate = useCallback((index: number) => {
+    setSelectedIndex(index);
+  }, []);
+  
+  // Convert to ChunkData format for the modal
+  const chunkData: ChunkData[] = results.map((r) => ({
+    chunkText: r.chunkText,
+    score: r.score,
+    chunkIndex: r.chunkIndex,
+    filePath: r.filePath,
+    headingPath: r.headingPath,
+    matchedTerms: r.matchedTerms,
+    queryType: r.queryType,
+    reranked: r.reranked,
+  }));
 
   return (
     <div className={cn(neumorphicBase, "my-3 p-4 isolate")}>
@@ -367,19 +375,9 @@ function SearchResult({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-gray-700 dark:text-neutral-300">
-              Searched
+              Knowledge Search
             </span>
             <IoCheckmarkCircle className="w-4 h-4 text-gray-500 dark:text-neutral-400" />
-            {/* Query type badge */}
-            <span
-              className={cn(
-                "text-[10px] font-medium px-1.5 py-0.5 rounded",
-                typeConfig.color
-              )}
-              title={typeConfig.description}
-            >
-              {typeConfig.label}
-            </span>
           </div>
           <p className="text-xs text-gray-500 dark:text-neutral-400 truncate">
             &quot;{query}&quot;
@@ -403,49 +401,108 @@ function SearchResult({
         </div>
       ) : (
         <div className={cn(neumorphicInset, "p-2")}>
+          {/* Pipeline explanation */}
+          <div
+            className={cn(
+              "mb-3 px-3 py-2 rounded-lg",
+              "bg-gradient-to-br from-gray-50 to-gray-100",
+              "dark:from-neutral-800/50 dark:to-neutral-900/50",
+              "shadow-[inset_1px_1px_2px_rgba(0,0,0,0.04),inset_-1px_-1px_2px_rgba(255,255,255,0.5)]",
+              "dark:shadow-[inset_1px_1px_2px_rgba(0,0,0,0.2),inset_-1px_-1px_2px_rgba(255,255,255,0.02)]"
+            )}
+          >
+            <p className="text-[10px] text-gray-500 dark:text-neutral-400 text-center leading-relaxed">
+              <span className="font-medium">Lexical</span>
+              <span className="mx-1 text-gray-300 dark:text-neutral-600">+</span>
+              <span className="font-medium">Semantic</span>
+              <span className="mx-1.5 text-gray-300 dark:text-neutral-600">→</span>
+              <span className="font-medium">RRF Fusion</span>
+              {results.some((r) => r.reranked) && (
+                <>
+                  <span className="mx-1.5 text-gray-300 dark:text-neutral-600">→</span>
+                  <span className="font-medium">Reranked</span>
+                </>
+              )}
+            </p>
+          </div>
+          
           {/* Grid layout for results - compact cards */}
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
             {results.map((result, i) => {
               const fileName = result.filePath.split("/").pop() || result.filePath;
-              const preview = result.chunkText.length > 60 
-                ? result.chunkText.substring(0, 60) + "…" 
+              const preview = result.chunkText.length > 80 
+                ? result.chunkText.substring(0, 80) + "…" 
                 : result.chunkText;
 
               return (
-                <div
+                <button
                   key={i}
+                  onClick={() => handleOpenChunk(i)}
                   className={cn(
-                    "p-2 rounded-lg flex flex-col gap-1",
+                    "p-2 rounded-lg flex flex-col gap-1 text-left",
                     "bg-white dark:bg-neutral-800",
                     "shadow-[1px_1px_3px_rgba(0,0,0,0.06),-1px_-1px_3px_rgba(255,255,255,0.7)]",
                     "dark:shadow-[1px_1px_3px_rgba(0,0,0,0.25),-1px_-1px_3px_rgba(255,255,255,0.02)]",
-                    "cursor-default"
+                    "cursor-pointer",
+                    "hover:shadow-[2px_2px_5px_rgba(0,0,0,0.08),-2px_-2px_5px_rgba(255,255,255,0.8)]",
+                    "dark:hover:shadow-[2px_2px_5px_rgba(0,0,0,0.3),-2px_-2px_5px_rgba(255,255,255,0.03)]",
+                    "hover:scale-[1.02] active:scale-[0.98]",
+                    "transition-all duration-200",
+                    "focus:outline-none"
                   )}
-                  title={`${fileName}\nScore: ${Math.round(result.score * 100)}%\n${result.chunkText.substring(0, 200)}...`}
+                  title="Click to view full content"
                 >
                   {/* Header with icon and score */}
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1">
-                      <IoDocument className="w-3 h-3 text-gray-400 dark:text-neutral-500" />
-                      <span className="text-[10px] text-gray-400 dark:text-neutral-500 truncate font-mono max-w-[60px]">
+                    <div className="flex items-center gap-1 min-w-0 flex-1">
+                      <IoDocument className="w-3 h-3 text-gray-400 dark:text-neutral-500 flex-shrink-0" />
+                      <span className="text-[10px] text-gray-500 dark:text-neutral-400 truncate">
                         {fileName}
                       </span>
                     </div>
-                    <span className="text-xs font-semibold text-gray-600 dark:text-neutral-400">
+                    <span
+                      className={cn(
+                        "text-xs font-semibold flex-shrink-0 ml-1",
+                        result.score >= 0.7
+                          ? "text-emerald-600 dark:text-emerald-400"
+                          : result.score >= 0.5
+                          ? "text-amber-600 dark:text-amber-400"
+                          : "text-gray-500 dark:text-neutral-400"
+                      )}
+                    >
                       {Math.round(result.score * 100)}%
                     </span>
                   </div>
+                  
+                  {/* Heading path if available */}
+                  {result.headingPath && (
+                    <p className="text-[9px] text-gray-400 dark:text-neutral-500 truncate">
+                      {result.headingPath}
+                    </p>
+                  )}
                   
                   {/* Content preview */}
                   <p className="text-xs text-gray-600 dark:text-neutral-400 line-clamp-3 leading-tight">
                     {preview}
                   </p>
-                </div>
+                </button>
               );
             })}
           </div>
         </div>
       )}
+      
+      {/* Chunk Viewer Modal */}
+      <ChunkViewerModal
+        isOpen={selectedIndex !== null}
+        onClose={handleCloseModal}
+        chunk={selectedIndex !== null ? chunkData[selectedIndex] : null}
+        chunkType="knowledge"
+        query={query}
+        chunks={chunkData}
+        currentIndex={selectedIndex ?? 0}
+        onNavigate={handleNavigate}
+      />
     </div>
   );
 }

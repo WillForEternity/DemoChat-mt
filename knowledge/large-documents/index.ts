@@ -5,5 +5,14 @@
  */
 
 export * from "./types";
-export * from "./idb";
+export {
+  getLargeDocumentsDb,
+  clearLargeDocumentsDb,
+  getDocumentUmapCache,
+  saveDocumentUmapCache,
+  removeDocumentUmapCache,
+  clearDocumentUmapCache,
+  type DocumentUmapProjection,
+  type DocumentUmapCache,
+} from "./idb";
 export * from "./operations";

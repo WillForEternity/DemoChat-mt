@@ -28,6 +28,18 @@ export interface ChatChunk {
   messageIndex: number;
 }
 
+/**
+ * Options for chat chunking.
+ */
+export interface ChatChunkOptions {
+  /** Maximum tokens per chunk (default: 500) */
+  maxTokens?: number;
+  /** Overlap tokens between chunks (default: 75 = ~15%) */
+  overlapTokens?: number;
+  /** Minimum tokens for a chunk to be included (default: 50) */
+  minTokens?: number;
+}
+
 // =============================================================================
 // HELPERS
 // =============================================================================
@@ -104,7 +116,7 @@ function shouldIncludeMessage(message: UIMessage): boolean {
 // =============================================================================
 
 /**
- * Chunk chat messages for embedding.
+ * Chunk chat messages for embedding with overlap support.
  *
  * Algorithm:
  * 1. Filter to user/assistant messages with text content
@@ -112,16 +124,23 @@ function shouldIncludeMessage(message: UIMessage): boolean {
  *    - Prefix with role context: "[User]: " or "[Assistant]: "
  *    - If under maxTokens, keep as single chunk
  *    - If over, split on paragraph then sentence boundaries
+ *    - Include overlap from previous chunk to preserve context
  * 3. Return indexed chunks with metadata
  *
  * @param messages - Array of UIMessage from a conversation
- * @param maxTokens - Maximum tokens per chunk (default: 500)
+ * @param optionsOrMaxTokens - Options object or max tokens (for backward compat)
  * @returns Array of ChatChunk ready for embedding
  */
 export function chunkChatMessages(
   messages: UIMessage[],
-  maxTokens = 500
+  optionsOrMaxTokens: ChatChunkOptions | number = 500
 ): ChatChunk[] {
+  // Support both old and new signatures for backward compatibility
+  const options: ChatChunkOptions = typeof optionsOrMaxTokens === "number"
+    ? { maxTokens: optionsOrMaxTokens }
+    : optionsOrMaxTokens;
+  
+  const { maxTokens = 500, overlapTokens = 75, minTokens = 50 } = options;
   const chunks: ChatChunk[] = [];
   let messageIndex = 0;
 
@@ -223,7 +242,71 @@ export function chunkChatMessages(
     chunk.index = i;
   });
 
+  // Apply overlap: prepend trailing content from previous chunk to each chunk
+  // This ensures context is preserved across chunk boundaries
+  if (overlapTokens > 0 && chunks.length > 1) {
+    const overlappedChunks: ChatChunk[] = [chunks[0]]; // First chunk stays as-is
+
+    for (let i = 1; i < chunks.length; i++) {
+      const prevChunk = chunks[i - 1];
+      const currentChunk = chunks[i];
+
+      // Get the overlap text from the end of the previous chunk
+      const overlapText = getOverlapText(prevChunk.text, overlapTokens);
+      
+      // Only add overlap if it's meaningful and not just the role prefix
+      if (overlapText && overlapText.length > 10) {
+        // Add overlap as a context prefix, preserving the current chunk's content
+        const overlappedText = `[...${overlapText}]\n\n${currentChunk.text}`;
+        
+        // Only apply if the result doesn't exceed maxTokens too much (allow 20% overflow for overlap)
+        if (estimateTokens(overlappedText) <= maxTokens * 1.2) {
+          overlappedChunks.push({
+            ...currentChunk,
+            text: overlappedText,
+          });
+        } else {
+          overlappedChunks.push(currentChunk);
+        }
+      } else {
+        overlappedChunks.push(currentChunk);
+      }
+    }
+
+    return overlappedChunks;
+  }
+
   return chunks;
+}
+
+/**
+ * Extract the last N tokens worth of text from a chunk for overlap.
+ */
+function getOverlapText(text: string, overlapTokens: number): string {
+  const targetChars = overlapTokens * 4; // Rough estimate: 1 token ≈ 4 chars
+  
+  if (text.length <= targetChars) {
+    return text;
+  }
+  
+  // Try to break at a sentence or paragraph boundary for cleaner overlap
+  const endText = text.slice(-targetChars);
+  
+  // Look for a sentence break
+  const sentenceBreak = endText.search(/[.!?]\s+/);
+  if (sentenceBreak > endText.length * 0.3) {
+    // Found a sentence break in the second half
+    return endText.slice(sentenceBreak + 1).trim();
+  }
+  
+  // Look for a paragraph break
+  const paragraphBreak = endText.indexOf("\n\n");
+  if (paragraphBreak > endText.length * 0.3) {
+    return endText.slice(paragraphBreak + 2).trim();
+  }
+  
+  // Just return the raw overlap
+  return endText.trim();
 }
 
 /**

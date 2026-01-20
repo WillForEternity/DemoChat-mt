@@ -51,6 +51,7 @@ import type { ChatConversation } from "@/lib/chat-types";
 import { KnowledgeBrowser, type KnowledgeBrowserRef } from "./knowledge-browser";
 import { EmbeddingsViewer } from "./embeddings-viewer";
 import { ChatEmbeddingsViewer } from "./chat-embeddings-viewer";
+import { DocumentEmbeddingsViewer } from "./document-embeddings-viewer";
 import { LargeDocumentBrowser } from "./large-document-browser";
 import { useSession, signIn, signOut } from "@/lib/auth-client";
 import { getApiKeys, saveApiKeys, clearApiKeys, migrateAnonymousKeys, type StoredApiKeys } from "@/lib/api-keys";
@@ -993,7 +994,7 @@ export const ChatSidebar = forwardRef<ChatSidebarRef, ChatSidebarProps>(function
     setShowSettings(false);
     onSettingsClosed?.();
   }, [onSettingsClosed]);
-  const [embeddingsSubTab, setEmbeddingsSubTab] = useState<"kb" | "chats">("kb");
+  const [embeddingsSubTab, setEmbeddingsSubTab] = useState<"kb" | "chats" | "docs">("kb");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState(MIN_SIDEBAR_WIDTH);
@@ -1451,7 +1452,7 @@ export const ChatSidebar = forwardRef<ChatSidebarRef, ChatSidebarProps>(function
         /* Large Documents Tab */
         <LargeDocumentBrowser className="flex-1" />
       ) : (
-        /* Embeddings Viewer Tab with KB/Chats subtabs */
+        /* Embeddings Viewer Tab with KB/Chats/Docs subtabs */
         <div className="flex flex-col flex-1 overflow-hidden">
           {/* Sub-tab toggle */}
           <div className="px-3 py-2 border-b border-gray-200 dark:border-neutral-700 bg-gray-50/50 dark:bg-neutral-900/50 flex-shrink-0">
@@ -1459,32 +1460,45 @@ export const ChatSidebar = forwardRef<ChatSidebarRef, ChatSidebarProps>(function
               <button
                 onClick={() => setEmbeddingsSubTab("kb")}
                 className={cn(
-                  "flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all",
+                  "flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all",
                   embeddingsSubTab === "kb"
                     ? "bg-white dark:bg-neutral-700 text-gray-900 dark:text-neutral-100 shadow-sm"
                     : "text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-300"
                 )}
               >
-                KB Embeddings
+                KB
               </button>
               <button
                 onClick={() => setEmbeddingsSubTab("chats")}
                 className={cn(
-                  "flex-1 px-3 py-1.5 rounded-md text-xs font-medium transition-all",
+                  "flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all",
                   embeddingsSubTab === "chats"
                     ? "bg-white dark:bg-neutral-700 text-gray-900 dark:text-neutral-100 shadow-sm"
                     : "text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-300"
                 )}
               >
-                Chat Embeddings
+                Chats
+              </button>
+              <button
+                onClick={() => setEmbeddingsSubTab("docs")}
+                className={cn(
+                  "flex-1 px-2 py-1.5 rounded-md text-xs font-medium transition-all",
+                  embeddingsSubTab === "docs"
+                    ? "bg-white dark:bg-neutral-700 text-gray-900 dark:text-neutral-100 shadow-sm"
+                    : "text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-300"
+                )}
+              >
+                Docs
               </button>
             </div>
           </div>
           {/* Viewer based on selected sub-tab */}
           {embeddingsSubTab === "kb" ? (
             <EmbeddingsViewer className="flex-1" />
-          ) : (
+          ) : embeddingsSubTab === "chats" ? (
             <ChatEmbeddingsViewer className="flex-1" />
+          ) : (
+            <DocumentEmbeddingsViewer className="flex-1" />
           )}
         </div>
       )}

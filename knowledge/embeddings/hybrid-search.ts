@@ -27,6 +27,7 @@ import {
   type QueryType,
   type LexicalSearchResult,
 } from "./lexical-search";
+import { rerank, getRecommendedReranker, type RerankDocument, type RerankerConfig } from "./reranker";
 import type { EmbeddingRecord, SearchResult } from "./types";
 
 /**
@@ -52,6 +53,8 @@ export interface HybridSearchResult extends SearchResult {
   semanticRank?: number;
   /** Lexical rank (position in lexical-only results) */
   lexicalRank?: number;
+  /** Whether this result was reranked */
+  reranked?: boolean;
 }
 
 /**
@@ -72,6 +75,12 @@ export interface HybridSearchOptions {
   fusionMethod?: FusionMethod;
   /** RRF smoothing constant k (default: 60, standard value) */
   rrfK?: number;
+  /** Enable reranking for better accuracy (default: auto-detect based on available API keys) */
+  rerank?: boolean;
+  /** Reranker backend to use */
+  rerankerBackend?: RerankerConfig["backend"];
+  /** Number of candidates to retrieve before reranking (default: 50) */
+  retrieveK?: number;
 }
 
 /**
@@ -253,6 +262,7 @@ export async function hybridSearch(
   // Combine results based on fusion method
   if (fusionMethod === "rrf") {
     return hybridSearchRRF(
+      query,
       allEmbeddings,
       semanticRanks,
       lexicalRanks,
@@ -262,7 +272,10 @@ export async function hybridSearch(
       topK,
       threshold,
       rrfK,
-      includeBreakdown
+      includeBreakdown,
+      options.rerank,
+      options.rerankerBackend,
+      options.retrieveK
     );
   } else {
     return hybridSearchWeighted(
@@ -281,9 +294,10 @@ export async function hybridSearch(
 }
 
 /**
- * RRF-based hybrid search fusion.
+ * RRF-based hybrid search fusion with optional reranking.
  */
-function hybridSearchRRF(
+async function hybridSearchRRF(
+  query: string,
   allEmbeddings: EmbeddingRecord[],
   semanticRanks: Map<string, number>,
   lexicalRanks: Map<string, number>,
@@ -293,8 +307,11 @@ function hybridSearchRRF(
   topK: number,
   threshold: number,
   rrfK: number,
-  includeBreakdown: boolean
-): HybridSearchResult[] {
+  includeBreakdown: boolean,
+  enableRerank?: boolean,
+  rerankerBackend?: RerankerConfig["backend"],
+  retrieveK: number = 50
+): Promise<HybridSearchResult[]> {
   const combinedResults: Array<{
     embedding: EmbeddingRecord;
     rrfScore: number;
@@ -328,18 +345,93 @@ function hybridSearchRRF(
     });
   }
 
-  // Sort by RRF score and filter by threshold
-  const sortedResults = combinedResults
-    .filter((r) => r.rrfScore >= threshold)
-    .sort((a, b) => b.rrfScore - a.rrfScore)
-    .slice(0, topK);
+  // Sort by RRF score
+  combinedResults.sort((a, b) => b.rrfScore - a.rrfScore);
 
-  // Format results
-  return sortedResults.map((r) => ({
+  // Determine if we should rerank
+  const shouldRerank = enableRerank ?? (getRecommendedReranker() !== "none");
+  const candidateCount = shouldRerank ? retrieveK : topK;
+
+  // Get candidates (more if reranking)
+  const candidates = combinedResults.slice(0, candidateCount);
+
+  // Filter by semantic threshold
+  const filtered = candidates.filter((r) => r.semanticScore >= threshold);
+
+  if (filtered.length === 0) {
+    return [];
+  }
+
+  // Apply reranking if enabled
+  if (shouldRerank && filtered.length > 1) {
+    const rerankDocs: RerankDocument[] = filtered.map((r) => ({
+      id: r.embedding.id,
+      text: r.embedding.chunkText,
+      originalScore: r.rrfScore,
+      metadata: {
+        filePath: r.embedding.filePath,
+        headingPath: r.embedding.headingPath,
+        chunkIndex: r.embedding.chunkIndex,
+        semanticScore: r.semanticScore,
+        lexicalScore: r.lexicalScore,
+        matchedTerms: r.matchedTerms,
+        semanticRank: r.semanticRank,
+        lexicalRank: r.lexicalRank,
+      },
+    }));
+
+    try {
+      const reranked = await rerank(query, rerankDocs, {
+        backend: rerankerBackend ?? getRecommendedReranker(),
+        topK,
+      });
+
+      // Build results from reranked list
+      return reranked.map((r) => {
+        const meta = r.metadata as {
+          filePath: string;
+          headingPath: string;
+          chunkIndex: number;
+          semanticScore: number;
+          lexicalScore: number;
+          matchedTerms: string[];
+          semanticRank: number | null;
+          lexicalRank: number | null;
+        };
+        return {
+          filePath: meta.filePath,
+          chunkText: r.text,
+          headingPath: meta.headingPath,
+          score: Math.round(r.relevanceScore * 100) / 100,
+          chunkIndex: meta.chunkIndex,
+          semanticScore: Math.round(meta.semanticScore * 100) / 100,
+          lexicalScore: Math.round(meta.lexicalScore * 100) / 100,
+          matchedTerms: includeBreakdown ? meta.matchedTerms : [],
+          queryType,
+          fusionMethod: "rrf" as FusionMethod,
+          semanticRank: includeBreakdown ? meta.semanticRank ?? undefined : undefined,
+          lexicalRank: includeBreakdown ? meta.lexicalRank ?? undefined : undefined,
+          reranked: true,
+        };
+      });
+    } catch (error) {
+      console.error("[HybridSearch] Reranking failed, using RRF results:", error);
+      // Fall through to non-reranked results
+    }
+  }
+
+  // Return results without reranking (take topK)
+  const finalResults = filtered.slice(0, topK);
+
+  // Format results - use semantic score as the display "score" since it's more interpretable
+  // The ordering is still based on RRF, which is the key benefit
+  return finalResults.map((r) => ({
     filePath: r.embedding.filePath,
     chunkText: r.embedding.chunkText,
     headingPath: r.embedding.headingPath,
-    score: Math.round(r.rrfScore * 10000) / 10000, // RRF scores are small, keep more precision
+    // Use semantic score as the primary display score (0-1 range, interpretable)
+    // RRF is used for ordering, but semantic similarity is what users understand
+    score: Math.round(r.semanticScore * 100) / 100,
     chunkIndex: r.embedding.chunkIndex,
     semanticScore: Math.round(r.semanticScore * 100) / 100,
     lexicalScore: Math.round(r.lexicalScore * 100) / 100,
@@ -348,6 +440,7 @@ function hybridSearchRRF(
     fusionMethod: "rrf" as FusionMethod,
     semanticRank: includeBreakdown ? r.semanticRank ?? undefined : undefined,
     lexicalRank: includeBreakdown ? r.lexicalRank ?? undefined : undefined,
+    reranked: false,
   }));
 }
 
@@ -430,6 +523,7 @@ function hybridSearchWeighted(
     fusionMethod: "weighted" as FusionMethod,
     semanticRank: includeBreakdown ? r.semanticRank ?? undefined : undefined,
     lexicalRank: includeBreakdown ? r.lexicalRank ?? undefined : undefined,
+    reranked: false, // Weighted fusion doesn't support reranking
   }));
 }
 
