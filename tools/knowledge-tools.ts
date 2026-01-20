@@ -13,6 +13,10 @@
  * - kb_mkdir: Create a folder
  * - kb_delete: Delete a file or folder
  * - kb_search: Semantic search across all files (RAG)
+ * - kb_link: Create a relationship between files
+ * - kb_unlink: Remove a relationship between files
+ * - kb_links: Query all relationships for a file
+ * - kb_graph: Traverse the knowledge graph
  */
 
 import { tool } from "ai";
@@ -136,6 +140,86 @@ Returns: Array of {conversationTitle, chunkText, messageRole, score, matchedTerm
   }),
 });
 
+// =============================================================================
+// KNOWLEDGE GRAPH TOOLS
+// =============================================================================
+
+const relationshipEnum = z.enum([
+  "extends",
+  "references",
+  "contradicts",
+  "requires",
+  "blocks",
+  "relates-to",
+]);
+
+export const kbLinkTool = tool({
+  description: `Create a relationship between two files in the knowledge base.
+Enables knowledge graph features: automatic context traversal, contradiction detection, prerequisite chains.
+
+RELATIONSHIP TYPES:
+- extends: Target builds on source concept (e.g., calculus extends algebra)
+- references: Target cites or mentions source
+- contradicts: Target conflicts with source (helps track evolution of thinking)
+- requires: Target is prerequisite for source
+- blocks: Source blocks progress on target
+- relates-to: General thematic connection
+
+Use bidirectional=true when relationship is symmetric (e.g., "relates-to" between similar topics).
+
+Both source and target files must exist in the knowledge base.
+
+Returns: { success: true, link: KnowledgeLink } or { success: false, error: string }`,
+  inputSchema: z.object({
+    source: z.string().describe("Source file path (must exist in KB)"),
+    target: z.string().describe("Target file path (must exist in KB)"),
+    relationship: relationshipEnum.describe("Type of relationship"),
+    bidirectional: z.boolean().optional().default(false).describe("If true, relationship is symmetric (A→B implies B→A)"),
+    notes: z.string().optional().describe("Optional context about this relationship"),
+  }),
+});
+
+export const kbUnlinkTool = tool({
+  description: `Remove a relationship between two files in the knowledge base.
+
+Returns: { success: true, deleted: boolean } or { success: false, error: string }`,
+  inputSchema: z.object({
+    source: z.string().describe("Source file path"),
+    target: z.string().describe("Target file path"),
+    relationship: relationshipEnum.describe("Type of relationship to remove"),
+  }),
+});
+
+export const kbLinksTool = tool({
+  description: `Query all relationships for a file. Returns both incoming and outgoing links.
+Use to understand how a piece of knowledge connects to others in the graph.
+
+Returns: { path, outgoing: KnowledgeLink[], incoming: KnowledgeLink[], total: number }`,
+  inputSchema: z.object({
+    path: z.string().describe("File path to query links for"),
+  }),
+});
+
+export const kbGraphTool = tool({
+  description: `Traverse the knowledge graph from a starting point.
+Returns connected nodes up to specified depth using BFS traversal.
+
+USE CASES:
+- Finding prerequisite chains (relationship="requires", direction="outgoing")
+- Discovering related content (direction="both")
+- Impact analysis - what depends on this file (direction="incoming")
+- Finding contradictions (relationship="contradicts")
+
+Returns: { rootPath, depth, nodes: GraphNode[], totalLinks: number }
+Each node contains: { path, links: { outgoing, incoming } }`,
+  inputSchema: z.object({
+    startPath: z.string().describe("Starting file path for traversal"),
+    depth: z.number().optional().default(2).describe("Max traversal depth (1-5, default: 2)"),
+    relationship: relationshipEnum.optional().describe("Filter to specific relationship type"),
+    direction: z.enum(["outgoing", "incoming", "both"]).optional().default("both").describe("Direction to traverse"),
+  }),
+});
+
 export const knowledgeTools = {
   kb_list: kbListTool,
   kb_read: kbReadTool,
@@ -145,4 +229,8 @@ export const knowledgeTools = {
   kb_delete: kbDeleteTool,
   kb_search: kbSearchTool,
   chat_search: chatSearchTool,
+  kb_link: kbLinkTool,
+  kb_unlink: kbUnlinkTool,
+  kb_links: kbLinksTool,
+  kb_graph: kbGraphTool,
 };

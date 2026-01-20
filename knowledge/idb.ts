@@ -8,6 +8,7 @@
  * - v1: Initial nodes store
  * - v2: Added embeddings store for RAG semantic search
  * - v3: Added metadata store for UMAP projection cache
+ * - v4: Added links store for knowledge graph relationships
  * 
  * IMPORTANT: We keep the database name as "knowledge_v1" but upgrade the
  * schema version. This preserves existing data while adding new features.
@@ -16,6 +17,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import type { KnowledgeNode } from "./types";
 import type { EmbeddingRecord } from "./embeddings/types";
+import type { KnowledgeLink } from "./links/types";
 
 /**
  * Cached UMAP projection for embedding visualization.
@@ -30,6 +32,25 @@ export interface UmapCache {
   /** Number of embeddings when projection was computed (for invalidation check) */
   embeddingCount: number;
 }
+
+/**
+ * Cached graph layout for knowledge graph visualization.
+ * Stores force-directed node positions so they don't need to be recomputed.
+ */
+export interface GraphLayoutCache {
+  id: "graph_layout";
+  /** Node positions keyed by node ID (file path) */
+  nodes: Array<{ id: string; x: number; y: number }>;
+  /** Timestamp of when this layout was computed */
+  computedAt: number;
+  /** Number of links when layout was computed (for invalidation check) */
+  linkCount: number;
+  /** Hash of link IDs to detect changes */
+  linkHash: string;
+}
+
+// Union type for metadata values
+type MetadataValue = UmapCache | GraphLayoutCache;
 
 interface KnowledgeDbSchema extends DBSchema {
   nodes: {
@@ -46,7 +67,16 @@ interface KnowledgeDbSchema extends DBSchema {
   };
   metadata: {
     key: string;
-    value: UmapCache;
+    value: MetadataValue;
+  };
+  links: {
+    key: string;
+    value: KnowledgeLink;
+    indexes: {
+      "by-source": string; // Find all outgoing links from a file
+      "by-target": string; // Find all incoming links to a file
+      "by-relationship": string; // Filter links by relationship type
+    };
   };
 }
 
@@ -56,7 +86,7 @@ export function getKnowledgeDb() {
   if (!dbPromise) {
     // Use the SAME database name "knowledge_v1" but upgrade schema version
     // This preserves all existing data while adding new features
-    dbPromise = openDB<KnowledgeDbSchema>("knowledge_v1", 3, {
+    dbPromise = openDB<KnowledgeDbSchema>("knowledge_v1", 4, {
       upgrade(db, oldVersion, newVersion) {
         console.log(`[Knowledge DB] Upgrading from v${oldVersion} to v${newVersion}`);
         
@@ -82,6 +112,15 @@ export function getKnowledgeDb() {
         if (!db.objectStoreNames.contains("metadata")) {
           console.log("[Knowledge DB] Creating metadata store");
           db.createObjectStore("metadata", { keyPath: "id" });
+        }
+
+        // Create links store for knowledge graph relationships (new in schema v4)
+        if (!db.objectStoreNames.contains("links")) {
+          console.log("[Knowledge DB] Creating links store");
+          const linksStore = db.createObjectStore("links", { keyPath: "id" });
+          linksStore.createIndex("by-source", "source", { unique: false });
+          linksStore.createIndex("by-target", "target", { unique: false });
+          linksStore.createIndex("by-relationship", "relationship", { unique: false });
         }
 
         console.log("[Knowledge DB] Upgrade complete");
@@ -167,4 +206,83 @@ export async function migrateFromV2NameIfNeeded(): Promise<void> {
   } catch (error) {
     console.error("[Knowledge DB] Migration from v2 name failed:", error);
   }
+}
+
+// =============================================================================
+// GRAPH LAYOUT CACHE OPERATIONS
+// =============================================================================
+
+/**
+ * Generate a hash of link IDs to detect changes to the graph.
+ */
+function hashLinkIds(linkIds: string[]): string {
+  // Simple hash: sort IDs and join, then use a basic hash
+  const sorted = [...linkIds].sort();
+  let hash = 0;
+  const str = sorted.join("|");
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return hash.toString(36);
+}
+
+/**
+ * Get cached graph layout for visualization.
+ * Returns null if no cache exists or if it's invalid (links changed).
+ */
+export async function getGraphLayoutCache(): Promise<GraphLayoutCache | null> {
+  const db = await getKnowledgeDb();
+  const cache = await db.get("metadata", "graph_layout");
+  if (!cache || cache.id !== "graph_layout") return null;
+  return cache as GraphLayoutCache;
+}
+
+/**
+ * Save graph layout to cache.
+ */
+export async function saveGraphLayoutCache(
+  nodes: Array<{ id: string; x: number; y: number }>,
+  linkCount: number,
+  linkIds: string[]
+): Promise<void> {
+  const db = await getKnowledgeDb();
+  const cache: GraphLayoutCache = {
+    id: "graph_layout",
+    nodes,
+    computedAt: Date.now(),
+    linkCount,
+    linkHash: hashLinkIds(linkIds),
+  };
+  await db.put("metadata", cache);
+  console.log(`[GraphLayout] Cached layout for ${nodes.length} nodes`);
+}
+
+/**
+ * Validate if the cached layout is still valid for current links.
+ */
+export async function validateGraphLayoutCache(
+  currentLinkCount: number,
+  currentLinkIds: string[]
+): Promise<boolean> {
+  const cache = await getGraphLayoutCache();
+  if (!cache) return false;
+  
+  // Check if link count matches
+  if (cache.linkCount !== currentLinkCount) return false;
+  
+  // Check if link hash matches
+  const currentHash = hashLinkIds(currentLinkIds);
+  return cache.linkHash === currentHash;
+}
+
+/**
+ * Clear graph layout cache.
+ * Called when links are modified.
+ */
+export async function clearGraphLayoutCache(): Promise<void> {
+  const db = await getKnowledgeDb();
+  await db.delete("metadata", "graph_layout");
+  console.log("[GraphLayout] Cache cleared");
 }

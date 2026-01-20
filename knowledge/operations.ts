@@ -8,6 +8,7 @@
 import { getKnowledgeDb, initRootIfNeeded } from "./idb";
 import type { KnowledgeNode, KnowledgeTree } from "./types";
 import { embedFile, deleteFileEmbeddings } from "./embeddings/operations";
+import { deleteLinksForFile } from "./links/operations";
 
 function parentPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
@@ -144,10 +145,15 @@ export async function deleteNode(path: string): Promise<void> {
 
   await db.delete("nodes", normalizedPath);
 
-  // Also delete associated embeddings (for files)
+  // Also delete associated embeddings and links (for files)
   if (node.type === "file") {
     deleteFileEmbeddings(normalizedPath).catch((error) => {
       console.error("[Knowledge] Failed to delete embeddings:", error);
+    });
+
+    // Cascade delete all links where this file is source or target
+    deleteLinksForFile(normalizedPath).catch((error) => {
+      console.error("[Knowledge] Failed to delete links:", error);
     });
   }
 }

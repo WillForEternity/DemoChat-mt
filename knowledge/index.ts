@@ -26,7 +26,16 @@
 export * from "./types";
 export * from "./operations";
 export * from "./kb-summary";
-export { getKnowledgeDb, initRootIfNeeded, migrateFromV2NameIfNeeded } from "./idb";
+export { 
+  getKnowledgeDb, 
+  initRootIfNeeded, 
+  migrateFromV2NameIfNeeded,
+  // Graph layout cache
+  getGraphLayoutCache,
+  saveGraphLayoutCache,
+  validateGraphLayoutCache,
+  clearGraphLayoutCache,
+} from "./idb";
 
 // Embedding/search exports
 export {
@@ -62,4 +71,37 @@ export {
 
 export type { SearchResult, EmbeddingRecord, Chunk } from "./embeddings/types";
 export type { ReindexProgressCallback } from "./embeddings/operations";
-export type { UmapCache } from "./idb";
+export type { UmapCache, GraphLayoutCache } from "./idb";
+
+// Knowledge graph links exports
+export {
+  createLink,
+  deleteLink,
+  getLinksForFile,
+  getAllLinks,
+  getLinksByRelationship,
+  deleteLinksForFile,
+  getLinkStats,
+} from "./links/operations";
+
+export {
+  traverseGraph,
+  findPath,
+  findContradictions,
+  buildAdjacencyList,
+  getPrerequisiteChain,
+  getDependents,
+  RELATIONSHIP_COLORS,
+  RELATIONSHIP_LABELS,
+} from "./links/graph-traversal";
+
+export type {
+  KnowledgeLink,
+  RelationshipType,
+  LinkQueryResult,
+  GraphNode,
+  GraphTraversalResult,
+  CreateLinkOptions,
+  TraversalOptions,
+  AdjacencyList,
+} from "./links/types";

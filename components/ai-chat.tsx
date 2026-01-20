@@ -1125,12 +1125,14 @@ import {
 
 // Tool UI components - beautiful neumorphic views
 import { KnowledgeToolView } from "@/components/tools/knowledge-tool-view";
+import { KnowledgeLinkToolView } from "@/components/tools/knowledge-link-tool-view";
 import { WebSearchView } from "@/components/tools/web-search-view";
 import { ChatSearchView } from "@/components/tools/chat-search-view";
 import { DocumentSearchView, DocumentListView } from "@/components/tools/document-search-view";
 import { GenericToolView } from "@/components/tools/generic-tool-view";
 import { ContextSaverView, type ParallelTask } from "@/components/tools/context-saver-view";
 import { AgentOrchestratorView, MAX_AGENTS, type OrchestratorState, type AgentTask, type AgentStatus } from "@/components/tools/agent-orchestrator-view";
+import { PdfExportView } from "@/components/tools/pdf-export-view";
 
 // =============================================================================
 // INLINE ICON SUPPORT FOR MARKDOWN
@@ -4011,6 +4013,86 @@ ${documents.map((d) => {
             }
             break;
           }
+          // =============================================================================
+          // KNOWLEDGE GRAPH TOOLS
+          // =============================================================================
+          case "kb_link": {
+            // Create a relationship between two files
+            const result = await kb.createLink(
+              args.source as string,
+              args.target as string,
+              args.relationship as kb.RelationshipType,
+              {
+                bidirectional: args.bidirectional as boolean | undefined,
+                notes: args.notes as string | undefined,
+              }
+            );
+            output = result;
+            break;
+          }
+          case "kb_unlink": {
+            // Remove a relationship between two files
+            const result = await kb.deleteLink(
+              args.source as string,
+              args.target as string,
+              args.relationship as kb.RelationshipType
+            );
+            output = result;
+            break;
+          }
+          case "kb_links": {
+            // Query all links for a file
+            const result = await kb.getLinksForFile(args.path as string);
+            
+            // XML-formatted output for context engineering
+            const xmlOutput = `<file_links path="${result.path}" total="${result.total}">
+<outgoing count="${result.outgoing.length}">
+${result.outgoing.map((l) => `<link target="${l.target}" relationship="${l.relationship}"${l.bidirectional ? ' bidirectional="true"' : ''}${l.notes ? ` notes="${l.notes}"` : ''} />`).join("\n")}
+</outgoing>
+<incoming count="${result.incoming.length}">
+${result.incoming.map((l) => `<link source="${l.source}" relationship="${l.relationship}"${l.bidirectional ? ' bidirectional="true"' : ''}${l.notes ? ` notes="${l.notes}"` : ''} />`).join("\n")}
+</incoming>
+</file_links>`;
+            output = { links_xml: xmlOutput, ...result };
+            break;
+          }
+          case "kb_graph": {
+            // Traverse the knowledge graph
+            const result = await kb.traverseGraph(
+              args.startPath as string,
+              {
+                depth: args.depth as number | undefined,
+                relationship: args.relationship as kb.RelationshipType | undefined,
+                direction: args.direction as "outgoing" | "incoming" | "both" | undefined,
+              }
+            );
+            
+            // XML-formatted output for context engineering
+            const xmlOutput = `<graph_traversal root="${result.rootPath}" depth="${result.depth}" total_links="${result.totalLinks}">
+${result.nodes.map((n) => `<node path="${n.path}">
+${n.links.outgoing.length > 0 ? `<outgoing>${n.links.outgoing.map((l) => `<link target="${l.target}" relationship="${l.relationship}" />`).join("")}</outgoing>` : ''}
+${n.links.incoming.length > 0 ? `<incoming>${n.links.incoming.map((l) => `<link source="${l.source}" relationship="${l.relationship}" />`).join("")}</incoming>` : ''}
+</node>`).join("\n")}
+</graph_traversal>`;
+            output = { graph_xml: xmlOutput, ...result };
+            break;
+          }
+          // =============================================================================
+          // PDF EXPORT TOOL
+          // =============================================================================
+          case "pdf_export": {
+            // Export recent chat messages as PDF with markdown/LaTeX formatting
+            const { generateChatPdf } = await import("@/lib/pdf-generator");
+            const result = await generateChatPdf(messages, {
+              filename: args.filename as string | undefined,
+              title: args.title as string | undefined,
+              messageCount: args.messageCount as number | undefined,
+              includeUserMessages: args.includeUserMessages as boolean | undefined,
+              includeAssistantMessages: args.includeAssistantMessages as boolean | undefined,
+            });
+            output = result;
+            break;
+          }
           default:
             output = { error: `Unknown tool: ${toolName}` };
         }
@@ -4852,6 +4934,14 @@ ${documents.map((d) => {
       );
     }
 
+    // Knowledge graph tools - link, unlink, links, graph
+    const knowledgeLinkTools = ["kb_link", "kb_unlink", "kb_links", "kb_graph"];
+    if (knowledgeLinkTools.includes(toolName)) {
+      return (
+        <KnowledgeLinkToolView key={index} toolName={toolName} invocation={invocation} />
+      );
+    }
+
     // Web search tool - beautiful neumorphic UI
     // Handle both custom web_search and Anthropic's provider-defined webSearch tool
     // The tool can appear as: web_search, webSearch, webSearch_20250305, etc.
@@ -4877,6 +4967,11 @@ ${documents.map((d) => {
     // Document list tool - lists all uploaded documents
     if (toolName === "document_list") {
       return <DocumentListView key={index} invocation={invocation} />;
+    }
+
+    // PDF export tool - exports chat as PDF with markdown/LaTeX rendering
+    if (toolName === "pdf_export") {
+      return <PdfExportView key={index} invocation={invocation} />;
     }
 
     // All other tools - use generic neumorphic UI

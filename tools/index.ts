@@ -72,6 +72,7 @@ import { knowledgeTools } from "./knowledge-tools";
 import { saveToContextTool } from "./save-to-context";
 import { createWebSearchTool } from "./web-search";
 import { documentTools } from "./document-search";
+import { pdfExportTools } from "./pdf-export";
 
 // =============================================================================
 // TOOLS EXPORT
@@ -99,6 +100,7 @@ export function createTools(apiKey: string): ToolSet {
   return {
     ...knowledgeTools,
     ...documentTools,
+    ...pdfExportTools,
     save_to_context: saveToContextTool,
     web_search: createWebSearchTool(apiKey),
   };
@@ -111,10 +113,11 @@ export function createTools(apiKey: string): ToolSet {
 export const staticTools = {
   ...knowledgeTools,
   ...documentTools,
+  ...pdfExportTools,
   save_to_context: saveToContextTool,
 } as const;
 
-export { knowledgeTools, documentTools, saveToContextTool, createWebSearchTool };
+export { knowledgeTools, documentTools, pdfExportTools, saveToContextTool, createWebSearchTool };
 
 // =============================================================================
 // TYPE EXPORTS
