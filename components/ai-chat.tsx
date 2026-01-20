@@ -3292,8 +3292,17 @@ export default function Chat({
   // Agent Orchestrator - unified view of all agents being spawned
   const [orchestratorState, setOrchestratorState] = useState<OrchestratorState | null>(null);
   
-  // Model selection state - "sonnet" = master, "opus" = grandmaster
-  const [modelTier, setModelTier] = useState<ModelTier>("sonnet");
+  // Model selection state - persisted to localStorage
+  // "haiku" = apprentice, "sonnet" = master, "opus" = grandmaster
+  const [modelTier, setModelTier] = useState<ModelTier>(() => {
+    if (typeof window !== "undefined") {
+      const stored = localStorage.getItem("model-tier");
+      if (stored === "haiku" || stored === "sonnet" || stored === "opus") {
+        return stored;
+      }
+    }
+    return "sonnet"; // default
+  });
   
   // Image token cache for token count calculation
   // Maps image URLs to their calculated token counts
@@ -3306,6 +3315,8 @@ export default function Chat({
   const modelTierRef = useRef<ModelTier>(modelTier);
   useEffect(() => {
     modelTierRef.current = modelTier;
+    // Persist to localStorage
+    localStorage.setItem("model-tier", modelTier);
   }, [modelTier]);
   
   // Detect dark mode for blob cat styling
@@ -5008,25 +5019,28 @@ ${n.links.incoming.length > 0 ? `<incoming>${n.links.incoming.map((l) => `<link 
           {/* Model selector - neumorphic button (outset by default, level on hover, inset on click) */}
           <button
             onClick={() => {
-              const newTier = modelTier === "sonnet" ? "opus" : "sonnet";
-              console.log("[Model Selector] Switching from", modelTier, "to", newTier);
-              setModelTier(newTier);
+              // Cycle through: haiku -> sonnet -> opus -> haiku
+              const nextTier: ModelTier = modelTier === "haiku" ? "sonnet" : modelTier === "sonnet" ? "opus" : "haiku";
+              console.log("[Model Selector] Switching from", modelTier, "to", nextTier);
+              setModelTier(nextTier);
             }}
             className={cn(
               "neu-tile neu-button",
               "px-4 py-1.5 text-xs font-semibold uppercase tracking-wider select-none"
             )}
-            title={`Click to switch to ${modelTier === "sonnet" ? "Opus" : "Sonnet"}`}
+            title={`Click to switch to ${modelTier === "haiku" ? "Sonnet" : modelTier === "sonnet" ? "Opus" : "Haiku"}`}
           >
             <div className="neu-inner">
               <span className={cn(
                 "neu-content",
-                // Text color - dark grey for Sonnet, black for Opus
-                modelTier === "sonnet"
-                  ? "text-gray-500 dark:text-neutral-400"
-                  : "text-black dark:text-white"
+                // Text color - lighter for Haiku, dark grey for Sonnet, black for Opus
+                modelTier === "haiku"
+                  ? "text-gray-400 dark:text-neutral-500"
+                  : modelTier === "sonnet"
+                    ? "text-gray-500 dark:text-neutral-400"
+                    : "text-black dark:text-white"
               )}>
-                {modelTier === "sonnet" ? "Sonnet" : "Opus"}
+                {modelTier === "haiku" ? "Haiku" : modelTier === "sonnet" ? "Sonnet" : "Opus"}
               </span>
             </div>
           </button>

@@ -43,16 +43,18 @@ import { createTools } from "@/tools";
 // =============================================================================
 
 /** Available model options for the chat agent */
-export type ModelTier = "sonnet" | "opus";
+export type ModelTier = "haiku" | "sonnet" | "opus";
 
 /** Model identifiers for each tier - using aliases for latest versions */
 export const MODEL_IDS: Record<ModelTier, string> = {
+  haiku: "claude-haiku-4-5-20251001",
   sonnet: "claude-sonnet-4-5-20250929",
   opus: "claude-opus-4-5-20251101",
 };
 
 /** Display names for the model selector */
 export const MODEL_DISPLAY_NAMES: Record<ModelTier, string> = {
+  haiku: "apprentice",
   sonnet: "master",
   opus: "grandmaster",
 };
@@ -113,7 +115,7 @@ ${folderXml}
 </knowledge_base>
 
 <assistant_identity>
-You are Claude (${modelTier === "opus" ? "Opus 4.5" : "Sonnet 4.5"}), a helpful AI assistant made by Anthropic.
+You are Claude (${modelTier === "opus" ? "Opus 4.5" : modelTier === "sonnet" ? "Sonnet 4.5" : "Haiku 4.5"}), a helpful AI assistant made by Anthropic.
 Be helpful, warm, and expressive. Your personality should shine through in every response.
 </assistant_identity>
 
