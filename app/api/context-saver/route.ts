@@ -14,10 +14,16 @@
  * The model is instructed to save in a single step (no read-before-write)
  * to avoid the need for multi-step tool loops that require bidirectional
  * communication.
+ *
+ * AUTHENTICATION & BYOK:
+ * ----------------------
+ * - Owner emails (set in OWNER_EMAILS env var) get free access using env API keys
+ * - Other users must provide their own API keys via the request body
  */
 
 import { streamText } from "ai";
 import { getContextSaverConfig } from "@/agents/context-saver-agent";
+import { getAuthContext, resolveApiKey, createApiKeyRequiredResponse } from "@/lib/auth-helper";
 
 // Maximum duration for the API route (in seconds)
 export const maxDuration = 30;
@@ -25,7 +31,7 @@ export const maxDuration = 30;
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { information, context, rootFolders, taskId } = body;
+    const { information, context, rootFolders, taskId, anthropicApiKey: userKey } = body;
 
     if (!information) {
       return new Response(
@@ -34,16 +40,14 @@ export async function POST(req: Request) {
       );
     }
 
-    // Get API key from environment variable
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    // Check authentication and owner status
+    const { isOwner } = await getAuthContext();
+
+    // Resolve which API key to use
+    const apiKey = resolveApiKey(isOwner, userKey, process.env.ANTHROPIC_API_KEY);
 
     if (!apiKey) {
-      return new Response(
-        JSON.stringify({
-          error: "ANTHROPIC_API_KEY is not set",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return createApiKeyRequiredResponse();
     }
 
     // Get the model configuration

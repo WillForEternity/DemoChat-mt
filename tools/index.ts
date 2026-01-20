@@ -71,6 +71,7 @@ import type { ToolSet } from "ai";
 import { knowledgeTools } from "./knowledge-tools";
 import { saveToContextTool } from "./save-to-context";
 import { createWebSearchTool } from "./web-search";
+import { documentTools } from "./document-search";
 
 // =============================================================================
 // TOOLS EXPORT
@@ -97,6 +98,7 @@ import { createWebSearchTool } from "./web-search";
 export function createTools(apiKey: string): ToolSet {
   return {
     ...knowledgeTools,
+    ...documentTools,
     save_to_context: saveToContextTool,
     web_search: createWebSearchTool(apiKey),
   };
@@ -108,10 +110,11 @@ export function createTools(apiKey: string): ToolSet {
  */
 export const staticTools = {
   ...knowledgeTools,
+  ...documentTools,
   save_to_context: saveToContextTool,
 } as const;
 
-export { knowledgeTools, saveToContextTool, createWebSearchTool };
+export { knowledgeTools, documentTools, saveToContextTool, createWebSearchTool };
 
 // =============================================================================
 // TYPE EXPORTS

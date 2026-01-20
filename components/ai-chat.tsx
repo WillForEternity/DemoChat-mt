@@ -29,6 +29,14 @@ import { DefaultChatTransport, lastAssistantMessageIsCompleteWithToolCalls } fro
 import type { UIMessage } from "ai";
 import type { ChatAgentUIMessage, ModelTier } from "@/agents";
 import * as kb from "@/knowledge";
+import { getApiKeys, hasApiKeys, type StoredApiKeys } from "@/lib/api-keys";
+import { useSession } from "@/lib/auth-client";
+import { 
+  getFreeChatsRemaining, 
+  incrementFreeChatCount, 
+  hasFreeChatRemaining,
+  needsApiKey 
+} from "@/lib/free-trial";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -1119,6 +1127,7 @@ import {
 import { KnowledgeToolView } from "@/components/tools/knowledge-tool-view";
 import { WebSearchView } from "@/components/tools/web-search-view";
 import { ChatSearchView } from "@/components/tools/chat-search-view";
+import { DocumentSearchView, DocumentListView } from "@/components/tools/document-search-view";
 import { GenericToolView } from "@/components/tools/generic-tool-view";
 import { ContextSaverView, type ParallelTask } from "@/components/tools/context-saver-view";
 import { AgentOrchestratorView, MAX_AGENTS, type OrchestratorState, type AgentTask, type AgentStatus } from "@/components/tools/agent-orchestrator-view";
@@ -2942,6 +2951,12 @@ interface ChatProps {
   onKnowledgeChange?: () => void;
   /** Called when AI generates a new title for the conversation */
   onTitleChange?: (title: string) => void;
+  /** Whether the user is an owner with free API access */
+  isOwner?: boolean;
+  /** Called when settings modal needs to be opened (e.g., free trial exhausted) */
+  onRequestSettings?: () => void;
+  /** Callback when API keys change */
+  onApiKeysChange?: (keys: StoredApiKeys) => void;
 }
 
 // =============================================================================
@@ -3235,6 +3250,9 @@ export default function Chat({
   onStreamingChange,
   onKnowledgeChange,
   onTitleChange,
+  isOwner = false,
+  onRequestSettings,
+  onApiKeysChange,
 }: ChatProps) {
   // ---------------------------------------------------------------------------
   // STATE
@@ -3284,6 +3302,84 @@ export default function Chat({
   useEffect(() => {
     modelTierRef.current = modelTier;
   }, [modelTier]);
+
+  // ---------------------------------------------------------------------------
+  // AUTHENTICATION & API KEYS (BYOK)
+  // ---------------------------------------------------------------------------
+  
+  // Get session from Better Auth
+  const { data: session } = useSession();
+  const userId = session?.user?.id;
+  
+  // API keys state - loaded from localStorage (user-scoped if logged in)
+  const [apiKeys, setApiKeys] = useState<StoredApiKeys>({});
+  
+  // Free trial state
+  const [freeChatsRemaining, setFreeChatsRemaining] = useState(() => getFreeChatsRemaining());
+  const [showTrialExhausted, setShowTrialExhausted] = useState(false);
+  
+  // Ref to always have latest apiKeys available (avoids stale closure)
+  const apiKeysRef = useRef<StoredApiKeys>(apiKeys);
+  useEffect(() => {
+    apiKeysRef.current = apiKeys;
+  }, [apiKeys]);
+  
+  // Load API keys from localStorage on mount and when user changes
+  useEffect(() => {
+    const keys = getApiKeys(userId);
+    setApiKeys(keys);
+  }, [userId]);
+  
+  // Handle API keys change from settings modal
+  const handleApiKeysChange = useCallback((keys: StoredApiKeys) => {
+    setApiKeys(keys);
+    onApiKeysChange?.(keys);
+    // If user adds API key, hide trial exhausted message
+    if (keys.anthropicApiKey) {
+      setShowTrialExhausted(false);
+    }
+  }, [onApiKeysChange]);
+  
+  // Ref to track if we should use free trial for the next request
+  const useFreeTrialRef = useRef(false);
+  
+  // Check if user can send messages (has access)
+  const canSendMessage = useCallback((): boolean => {
+    // Owners always have access
+    if (isOwner) return true;
+    // Users with their own API key have access
+    if (apiKeys.anthropicApiKey) return true;
+    // Check free trial
+    return hasFreeChatRemaining();
+  }, [isOwner, apiKeys.anthropicApiKey]);
+  
+  // Handle access check before sending - returns true if allowed
+  // Also sets the useFreeTrialRef for the transport to use
+  const checkAccessAndProceed = useCallback((): boolean => {
+    // Reset free trial flag
+    useFreeTrialRef.current = false;
+    
+    // Owners always have access (uses env key)
+    if (isOwner) return true;
+    
+    // Users with their own API key have access
+    if (apiKeys.anthropicApiKey) return true;
+    
+    // Check free trial
+    if (hasFreeChatRemaining()) {
+      // Use owner's API key for free trial
+      useFreeTrialRef.current = true;
+      // Increment free chat count
+      incrementFreeChatCount();
+      setFreeChatsRemaining(getFreeChatsRemaining());
+      return true;
+    }
+    
+    // Free trial exhausted - show settings
+    setShowTrialExhausted(true);
+    onRequestSettings?.();
+    return false;
+  }, [isOwner, apiKeys.anthropicApiKey, onRequestSettings]);
 
   // ---------------------------------------------------------------------------
   // FILE HANDLING
@@ -3526,6 +3622,8 @@ export default function Chat({
             context,
             rootFolders,
             taskId,
+            // BYOK: Include user's API key if they have one
+            anthropicApiKey: apiKeysRef.current.anthropicApiKey,
           }),
         });
 
@@ -3839,6 +3937,58 @@ ${r.chunkText}
             }
             break;
           }
+          case "document_search": {
+            // Semantic search across uploaded large documents
+            const { searchLargeDocuments, searchLargeDocument } = await import("@/knowledge/large-documents");
+            const query = args.query as string;
+            const topK = Math.min((args.topK as number) || 10, 25);
+            const documentId = args.documentId as string | undefined;
+            
+            const results = documentId
+              ? await searchLargeDocument(documentId, query, topK)
+              : await searchLargeDocuments(query, topK);
+            
+            if (results.length === 0) {
+              output = {
+                results: [],
+                message: "No matching content found in uploaded documents. The user may need to upload a document first via the Large Documents section in the sidebar.",
+              };
+            } else {
+              // XML-formatted output clearly marked as from large documents
+              const xmlOutput = `<search_results source="large_documents" query="${query}">
+${results.map((r) => {
+  return `<result score="${r.score}" document="${r.filename}" heading="${r.headingPath}">
+<chunk_text>
+${r.chunkText}
+</chunk_text>
+</result>`;
+}).join("\n")}
+</search_results>`;
+              output = { search_results: xmlOutput, results };
+            }
+            break;
+          }
+          case "document_list": {
+            // List all uploaded large documents
+            const { getAllLargeDocuments } = await import("@/knowledge/large-documents");
+            const documents = await getAllLargeDocuments();
+            
+            if (documents.length === 0) {
+              output = {
+                documents: [],
+                message: "No documents have been uploaded yet. The user can upload documents via the Large Documents section in the sidebar.",
+              };
+            } else {
+              // XML-formatted output for document list
+              const xmlOutput = `<documents count="${documents.length}">
+${documents.map((d) => {
+  return `<document id="${d.id}" filename="${d.filename}" status="${d.status}" chunks="${d.chunkCount}" size="${d.fileSize}" />`;
+}).join("\n")}
+</documents>`;
+              output = { documents_xml: xmlOutput, documents };
+            }
+            break;
+          }
           default:
             output = { error: `Unknown tool: ${toolName}` };
         }
@@ -3913,6 +4063,10 @@ ${r.chunkText}
             kbSummary,
             // Use ref to always get latest modelTier (avoids stale closure)
             modelTier: modelTierRef.current,
+            // BYOK: Include user's API key if they have one
+            anthropicApiKey: apiKeysRef.current.anthropicApiKey,
+            // Free trial: use owner's API key for first 5 chats
+            useFreeTrial: useFreeTrialRef.current,
           },
         }),
       } as any),
@@ -3966,7 +4120,11 @@ ${r.chunkText}
           const response = await fetch("/api/generate-title", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ messages: finishedMessages }),
+            body: JSON.stringify({ 
+              messages: finishedMessages,
+              // BYOK: Include user's API key if they have one
+              anthropicApiKey: apiKeysRef.current.anthropicApiKey,
+            }),
           });
           
           if (response.ok) {
@@ -4200,6 +4358,11 @@ ${r.chunkText}
     e?.preventDefault();
     // Allow submission if there's text OR images
     if ((!inputValue.trim() && attachedImages.length === 0) || isLoading) return;
+    
+    // Check access before sending (free trial or API key)
+    if (!checkAccessAndProceed()) {
+      return;
+    }
 
     // Scroll to bottom when submitting (immediate scroll)
     scrollToBottom(true);
@@ -4684,6 +4847,16 @@ ${r.chunkText}
       return <ChatSearchView key={index} invocation={invocation} />;
     }
 
+    // Document search tool - for large uploaded documents
+    if (toolName === "document_search") {
+      return <DocumentSearchView key={index} invocation={invocation} />;
+    }
+
+    // Document list tool - lists all uploaded documents
+    if (toolName === "document_list") {
+      return <DocumentListView key={index} invocation={invocation} />;
+    }
+
     // All other tools - use generic neumorphic UI
     return <GenericToolView key={index} toolName={toolName} invocation={invocation} />;
   };
@@ -4696,7 +4869,7 @@ ${r.chunkText}
       className="flex flex-col h-full w-full overflow-hidden relative bg-white dark:bg-neutral-950 neu-context-white"
     >
       {/* Header bar */}
-      <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-neutral-800 h-[52px] flex-shrink-0">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-neutral-800 h-[48px] flex-shrink-0">
         {/* Left side: Model selector + Token count */}
         <div className="flex items-center gap-3">
           {/* Model selector - pure neumorphic inset toggle */}
@@ -4740,19 +4913,36 @@ ${r.chunkText}
           </span>
         </div>
         
-        <h2 className="font-semibold text-gray-900 dark:text-neutral-500">Le Chat Noir</h2>
+        {/* Right side: Title */}
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-neutral-500">Le Chat Noir</h2>
+        </div>
       </div>
 
       {/* Error Display */}
       {error && (
         <div className="mx-8 mt-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm flex-shrink-0">
           <strong>Error:</strong> {error.message}
-          {error.message.includes("API") && (
+          {(error.message.includes("API") || error.message.includes("key")) && (
             <p className="mt-2 text-xs">
-              Make sure you have set your ANTHROPIC_API_KEY in the .env.local
-              file.
+              Open Settings in the sidebar to add your API keys, or sign in with an owner account.
             </p>
           )}
+        </div>
+      )}
+      
+      {/* Free Trial Exhausted Warning */}
+      {showTrialExhausted && !isOwner && !apiKeys.anthropicApiKey && (
+        <div className="mx-8 mt-4 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-amber-700 dark:text-amber-400 text-sm flex-shrink-0">
+          <strong>Free trial ended!</strong> You&apos;ve used all {5} free chats.
+          <p className="mt-2 text-xs">
+            To continue, please open <button 
+              onClick={() => onRequestSettings?.()} 
+              className="font-medium underline hover:no-underline"
+            >
+              Settings
+            </button> in the sidebar to add your API key or sign in with an owner account.
+          </p>
         </div>
       )}
       

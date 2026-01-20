@@ -6,10 +6,16 @@
  *
  * This endpoint is called at the end of each chat response to update
  * the conversation title based on the full content of the chat.
+ *
+ * AUTHENTICATION & BYOK:
+ * ----------------------
+ * - Owner emails (set in OWNER_EMAILS env var) get free access using env API keys
+ * - Other users must provide their own API keys via the request body
  */
 
 import { generateText } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { getAuthContext, resolveApiKey, createApiKeyRequiredResponse } from "@/lib/auth-helper";
 
 // Maximum duration for the API route (in seconds)
 export const maxDuration = 30;
@@ -17,18 +23,16 @@ export const maxDuration = 30;
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { messages } = body;
+    const { messages, anthropicApiKey: userKey } = body;
 
-    // Get API key from environment variable
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    // Check authentication and owner status
+    const { isOwner } = await getAuthContext();
+
+    // Resolve which API key to use
+    const apiKey = resolveApiKey(isOwner, userKey, process.env.ANTHROPIC_API_KEY);
 
     if (!apiKey) {
-      return new Response(
-        JSON.stringify({
-          error: "ANTHROPIC_API_KEY is not set.",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return createApiKeyRequiredResponse();
     }
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {

@@ -22,8 +22,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Chat from "@/components/ai-chat";
-import { ChatSidebar, type SidebarTab } from "@/components/chat-sidebar";
+import { ChatSidebar, type SidebarTab, type ChatSidebarRef } from "@/components/chat-sidebar";
 import { useChatHistory } from "@/lib/use-chat-history";
+import { useSession } from "@/lib/auth-client";
+import { getApiKeys, type StoredApiKeys } from "@/lib/api-keys";
 import type { UIMessage } from "ai";
 import type { KnowledgeBrowserRef } from "@/components/knowledge-browser";
 
@@ -57,6 +59,60 @@ export default function Home() {
   
   // Sidebar tab state - controlled from here and the hamburger menu
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("chats");
+  
+  // Sidebar ref for opening settings programmatically
+  const sidebarRef = useRef<ChatSidebarRef>(null);
+  
+  // Force open settings state (when free trial exhausted)
+  const [forceOpenSettings, setForceOpenSettings] = useState(false);
+  
+  // Auth session and owner check
+  const { data: session } = useSession();
+  const userId = session?.user?.id;
+  
+  // API keys state
+  const [apiKeys, setApiKeys] = useState<StoredApiKeys>({});
+  
+  // Load API keys when user changes
+  useEffect(() => {
+    const keys = getApiKeys(userId);
+    setApiKeys(keys);
+  }, [userId]);
+  
+  // Check owner status - would need to be fetched from server in production
+  // For now, we'll pass undefined and let the server determine
+  const [isOwner, setIsOwner] = useState(false);
+  
+  // Fetch owner status from server
+  useEffect(() => {
+    if (session?.user?.email) {
+      // We need to check with the server if this user is an owner
+      // This is done via the auth context on API calls
+      // For the UI, we'll make a simple check endpoint
+      fetch("/api/auth/check-owner")
+        .then(res => res.json())
+        .then(data => setIsOwner(data.isOwner ?? false))
+        .catch(() => setIsOwner(false));
+    } else {
+      setIsOwner(false);
+    }
+  }, [session?.user?.email]);
+  
+  // Handle request to open settings (e.g., from free trial exhausted)
+  const handleRequestSettings = useCallback(() => {
+    setForceOpenSettings(true);
+    sidebarRef.current?.openSettings();
+  }, []);
+  
+  // Handle settings closed
+  const handleSettingsClosed = useCallback(() => {
+    setForceOpenSettings(false);
+  }, []);
+  
+  // Handle API keys change
+  const handleApiKeysChange = useCallback((keys: StoredApiKeys) => {
+    setApiKeys(keys);
+  }, []);
 
   // Track all active chat sessions (keeps streaming chats alive when switching)
   const [activeSessions, setActiveSessions] = useState<ActiveChatSession[]>([]);
@@ -322,6 +378,7 @@ export default function Home() {
     <main className="flex h-screen w-full overflow-hidden">
       {/* Sidebar */}
       <ChatSidebar
+        ref={sidebarRef}
         conversations={conversations}
         activeConversationId={activeConversationId}
         onSelectConversation={handleSelectConversation}
@@ -334,6 +391,10 @@ export default function Home() {
         knowledgeBrowserRef={knowledgeBrowserRef}
         activeTab={sidebarTab}
         onTabChange={setSidebarTab}
+        isOwner={isOwner}
+        onApiKeysChange={handleApiKeysChange}
+        forceOpenSettings={forceOpenSettings}
+        onSettingsClosed={handleSettingsClosed}
       />
 
       {/* Chat Area - render all active sessions, but only show the visible one */}
@@ -354,6 +415,9 @@ export default function Home() {
                 onStreamingChange={callbacks.onStreamingChange}
                 onKnowledgeChange={callbacks.onKnowledgeChange}
                 onTitleChange={callbacks.onTitleChange}
+                isOwner={isOwner}
+                onRequestSettings={handleRequestSettings}
+                onApiKeysChange={handleApiKeysChange}
               />
             </div>
           );

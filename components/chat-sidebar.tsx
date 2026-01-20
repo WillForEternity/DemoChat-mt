@@ -14,7 +14,7 @@
  * - Settings panel with theme toggle
  */
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useImperativeHandle, forwardRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -38,12 +38,23 @@ import {
   Brain,
   Sparkles,
   Menu,
+  User,
+  Key,
+  LogOut,
+  CheckCircle,
+  AlertTriangle,
+  FileStack,
 } from "lucide-react";
+import { IoLogoGithub, IoLogoGoogle } from "react-icons/io5";
 import { cn } from "@/lib/utils";
 import type { ChatConversation } from "@/lib/chat-types";
 import { KnowledgeBrowser, type KnowledgeBrowserRef } from "./knowledge-browser";
 import { EmbeddingsViewer } from "./embeddings-viewer";
 import { ChatEmbeddingsViewer } from "./chat-embeddings-viewer";
+import { LargeDocumentBrowser } from "./large-document-browser";
+import { useSession, signIn, signOut } from "@/lib/auth-client";
+import { getApiKeys, saveApiKeys, clearApiKeys, migrateAnonymousKeys, type StoredApiKeys } from "@/lib/api-keys";
+import { getFreeChatsRemaining, getFreeChatLimit } from "@/lib/free-trial";
 
 // =============================================================================
 // SETTINGS TYPES
@@ -62,7 +73,7 @@ interface AppSettings {
 // TYPES
 // =============================================================================
 
-export type SidebarTab = "chats" | "knowledge" | "embeddings";
+export type SidebarTab = "chats" | "knowledge" | "large-documents" | "embeddings";
 
 interface ChatSidebarProps {
   conversations: ChatConversation[];
@@ -78,6 +89,16 @@ interface ChatSidebarProps {
   // Tab state controlled from parent
   activeTab: SidebarTab;
   onTabChange: (tab: SidebarTab) => void;
+  // Auth & API settings
+  isOwner?: boolean;
+  onApiKeysChange?: (keys: StoredApiKeys) => void;
+  forceOpenSettings?: boolean;
+  onSettingsClosed?: () => void;
+}
+
+// Export type for ref handle
+export interface ChatSidebarRef {
+  openSettings: () => void;
 }
 
 // =============================================================================
@@ -167,6 +188,8 @@ interface SettingsPanelProps {
   onClose: () => void;
   onClearAll: () => void;
   hasConversations: boolean;
+  isOwner?: boolean;
+  onApiKeysChange?: (keys: StoredApiKeys) => void;
 }
 
 function SettingsPanel({
@@ -174,8 +197,78 @@ function SettingsPanel({
   onClose,
   onClearAll,
   hasConversations,
+  isOwner: externalIsOwner,
+  onApiKeysChange,
 }: SettingsPanelProps) {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const { data: session, isPending: isSessionPending } = useSession();
+  
+  // API keys state
+  const [anthropicKey, setAnthropicKey] = useState("");
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [keysSaved, setKeysSaved] = useState(false);
+  
+  // Get user info
+  const isAuthenticated = Boolean(session?.user);
+  const userId = session?.user?.id;
+  const userEmail = session?.user?.email;
+  const userName = session?.user?.name;
+  const userImage = session?.user?.image;
+  const isOwner = externalIsOwner ?? false;
+  
+  // Free trial info
+  const freeChatsRemaining = getFreeChatsRemaining();
+  const freeChatLimit = getFreeChatLimit();
+  
+  // Load saved keys on mount and when user changes
+  useEffect(() => {
+    const keys = getApiKeys(userId);
+    setAnthropicKey(keys.anthropicApiKey || "");
+    setOpenaiKey(keys.openaiApiKey || "");
+  }, [userId, isOpen]);
+  
+  // Migrate anonymous keys when user logs in
+  useEffect(() => {
+    if (userId) {
+      migrateAnonymousKeys(userId);
+    }
+  }, [userId]);
+  
+  // Handle save keys
+  const handleSaveKeys = useCallback(() => {
+    const keys: StoredApiKeys = {};
+    if (anthropicKey.trim()) keys.anthropicApiKey = anthropicKey.trim();
+    if (openaiKey.trim()) keys.openaiApiKey = openaiKey.trim();
+    
+    saveApiKeys(keys, userId);
+    setKeysSaved(true);
+    onApiKeysChange?.(keys);
+    
+    // Reset saved indicator after 2 seconds
+    setTimeout(() => setKeysSaved(false), 2000);
+  }, [anthropicKey, openaiKey, userId, onApiKeysChange]);
+  
+  // Handle clear keys
+  const handleClearKeys = useCallback(() => {
+    clearApiKeys(userId);
+    setAnthropicKey("");
+    setOpenaiKey("");
+    onApiKeysChange?.({});
+  }, [userId, onApiKeysChange]);
+  
+  // Handle sign in
+  const handleSignIn = useCallback(async (provider: "github" | "google") => {
+    await signIn.social({
+      provider,
+      callbackURL: window.location.href,
+    });
+  }, []);
+  
+  // Handle sign out
+  const handleSignOut = useCallback(async () => {
+    await signOut();
+  }, []);
+
   const [settings, setSettings] = useState<AppSettings>(() => {
     if (typeof window !== "undefined") {
       const stored = localStorage.getItem("app-settings");
@@ -284,6 +377,178 @@ function SettingsPanel({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+          {/* Account Section */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <User className="w-4 h-4 text-gray-500 dark:text-neutral-500" />
+              <h3 className="text-sm font-medium text-gray-900 dark:text-neutral-500">Account</h3>
+            </div>
+
+            {isSessionPending ? (
+              <div className="text-sm text-gray-500 dark:text-neutral-500">Loading...</div>
+            ) : isAuthenticated ? (
+              <div className="space-y-3">
+                {/* User info */}
+                <div className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-neutral-800 rounded-lg">
+                  {userImage && (
+                    <img
+                      src={userImage}
+                      alt={userName || "User"}
+                      className="h-10 w-10 rounded-full"
+                    />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-gray-900 dark:text-neutral-100 truncate">{userName}</div>
+                    <div className="text-sm text-gray-500 dark:text-neutral-500 truncate">
+                      {userEmail}
+                    </div>
+                  </div>
+                  {isOwner && (
+                    <div className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400 bg-green-100 dark:bg-green-900/30 px-2 py-1 rounded-full">
+                      <CheckCircle className="h-3 w-3" />
+                      Owner
+                    </div>
+                  )}
+                </div>
+
+                {isOwner && (
+                  <div className="text-sm text-gray-600 dark:text-neutral-400 bg-green-50 dark:bg-green-900/20 p-3 rounded-lg border border-green-200 dark:border-green-800/50">
+                    <CheckCircle className="inline h-4 w-4 text-green-500 mr-1" />
+                    You have owner access. API keys are provided automatically.
+                  </div>
+                )}
+
+                <Button
+                  variant="neumorphic-secondary"
+                  className="w-full justify-center gap-2"
+                  onClick={handleSignOut}
+                >
+                  <LogOut className="h-4 w-4" />
+                  Sign Out
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm text-gray-500 dark:text-neutral-500">
+                  Sign in to save your preferences and check owner status.
+                </p>
+                
+                {/* Free trial indicator */}
+                <div className="text-sm text-gray-600 dark:text-neutral-400 bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg border border-blue-200 dark:border-blue-800/50">
+                  <span className="font-medium">{freeChatsRemaining}</span> of {freeChatLimit} free chats remaining
+                </div>
+                
+                <Button
+                  variant="neumorphic-secondary"
+                  className="w-full justify-start gap-2"
+                  onClick={() => handleSignIn("github")}
+                >
+                  <IoLogoGithub className="h-5 w-5" />
+                  Continue with GitHub
+                </Button>
+                <Button
+                  variant="neumorphic-secondary"
+                  className="w-full justify-start gap-2"
+                  onClick={() => handleSignIn("google")}
+                >
+                  <IoLogoGoogle className="h-5 w-5" />
+                  Continue with Google
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {/* API Keys Section */}
+          {!isOwner && (
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Key className="w-4 h-4 text-gray-500 dark:text-neutral-500" />
+                <h3 className="text-sm font-medium text-gray-900 dark:text-neutral-500">API Keys</h3>
+              </div>
+
+              <div className="text-sm text-gray-500 dark:text-neutral-500 mb-3 bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg border border-amber-200 dark:border-amber-800/50">
+                <AlertTriangle className="inline h-4 w-4 text-amber-500 mr-1" />
+                Enter your own API keys to use this app. Keys are stored locally
+                in your browser and never sent to our servers.
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-sm font-medium text-gray-900 dark:text-neutral-300 mb-1.5 block">
+                    Anthropic API Key
+                  </label>
+                  <Input
+                    type="password"
+                    placeholder="sk-ant-..."
+                    value={anthropicKey}
+                    onChange={(e) => setAnthropicKey(e.target.value)}
+                    className="bg-white dark:bg-neutral-800"
+                  />
+                  <p className="text-xs text-gray-500 dark:text-neutral-500 mt-1">
+                    Get your key at{" "}
+                    <a
+                      href="https://console.anthropic.com/settings/keys"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-500 hover:underline"
+                    >
+                      console.anthropic.com
+                    </a>
+                  </p>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium text-gray-900 dark:text-neutral-300 mb-1.5 block">
+                    OpenAI API Key
+                  </label>
+                  <Input
+                    type="password"
+                    placeholder="sk-proj-..."
+                    value={openaiKey}
+                    onChange={(e) => setOpenaiKey(e.target.value)}
+                    className="bg-white dark:bg-neutral-800"
+                  />
+                  <p className="text-xs text-gray-500 dark:text-neutral-500 mt-1">
+                    Required for semantic search. Get your key at{" "}
+                    <a
+                      href="https://platform.openai.com/api-keys"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-500 hover:underline"
+                    >
+                      platform.openai.com
+                    </a>
+                  </p>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <Button
+                    onClick={handleSaveKeys}
+                    variant="neumorphic-primary"
+                    className="flex-1"
+                    disabled={!anthropicKey.trim() && !openaiKey.trim()}
+                  >
+                    {keysSaved ? (
+                      <>
+                        <CheckCircle className="h-4 w-4 mr-2" />
+                        Saved!
+                      </>
+                    ) : (
+                      "Save Keys"
+                    )}
+                  </Button>
+                  <Button
+                    variant="neumorphic-secondary"
+                    onClick={handleClearKeys}
+                    disabled={!anthropicKey && !openaiKey}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Appearance Section */}
           <div>
             <div className="flex items-center gap-2 mb-3">
@@ -690,7 +955,7 @@ function ConversationItem({
 const MIN_SIDEBAR_WIDTH = 256; // 16rem = w-64
 const MAX_SIDEBAR_WIDTH = 800; // Max width when dragging
 
-export function ChatSidebar({
+export const ChatSidebar = forwardRef<ChatSidebarRef, ChatSidebarProps>(function ChatSidebar({
   conversations,
   activeConversationId,
   onSelectConversation,
@@ -703,9 +968,31 @@ export function ChatSidebar({
   knowledgeBrowserRef,
   activeTab,
   onTabChange,
-}: ChatSidebarProps) {
+  isOwner,
+  onApiKeysChange,
+  forceOpenSettings,
+  onSettingsClosed,
+}, ref) {
   const [isMounted, setIsMounted] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  
+  // Expose openSettings method via ref
+  useImperativeHandle(ref, () => ({
+    openSettings: () => setShowSettings(true),
+  }), []);
+  
+  // Handle forceOpenSettings prop
+  useEffect(() => {
+    if (forceOpenSettings) {
+      setShowSettings(true);
+    }
+  }, [forceOpenSettings]);
+  
+  // Handle settings close
+  const handleSettingsClose = useCallback(() => {
+    setShowSettings(false);
+    onSettingsClosed?.();
+  }, [onSettingsClosed]);
   const [embeddingsSubTab, setEmbeddingsSubTab] = useState<"kb" | "chats">("kb");
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -786,23 +1073,26 @@ export function ChatSidebar({
   // Collapsed state - just show toggle button
   if (isCollapsed) {
     return (
-      <div className="flex flex-col h-full w-12 border-r border-gray-200 dark:border-neutral-700 bg-gray-50/50 dark:bg-neutral-950 neu-context-gray">
-        <div className="p-2">
+      <div className="flex flex-col h-full w-14 border-r border-gray-200 dark:border-neutral-700 bg-gray-50/50 dark:bg-neutral-950 neu-context-gray">
+        {/* Expand button in header position */}
+        <div className="flex items-center justify-center h-[48px] flex-shrink-0">
           <Button
             size="icon"
             variant="neumorphic-secondary"
             onClick={onToggleCollapse}
-            className="h-8 w-8"
+            className="h-9 w-9"
+            title="Expand Sidebar"
           >
             <ChevronRight className="h-4 w-4" />
           </Button>
         </div>
-        <div className="p-2">
+        {/* New Chat button - aligned with expanded view */}
+        <div className="p-3 flex justify-center">
           <Button
             size="icon"
             variant="neumorphic-primary"
             onClick={onNewChat}
-            className="h-8 w-8"
+            className="h-9 w-9"
             title="New Chat"
           >
             <MessageSquarePlus className="h-4 w-4" />
@@ -811,11 +1101,11 @@ export function ChatSidebar({
         {/* Spacer to push settings to bottom */}
         <div className="flex-1" />
         {/* Settings Button */}
-        <div className="p-2 border-t border-gray-200 dark:border-neutral-700">
+        <div className="p-2 border-t border-gray-200 dark:border-neutral-700 flex justify-center">
           <Button
             size="icon"
             variant="neumorphic-secondary"
-            className="h-8 w-8"
+            className="h-9 w-9"
             title="Settings"
             onClick={() => setShowSettings(true)}
           >
@@ -826,9 +1116,11 @@ export function ChatSidebar({
         {/* Settings Panel */}
         <SettingsPanel
           isOpen={showSettings}
-          onClose={() => setShowSettings(false)}
+          onClose={handleSettingsClose}
           onClearAll={onClearAll}
           hasConversations={conversations.length > 0}
+          isOwner={isOwner}
+          onApiKeysChange={onApiKeysChange}
         />
       </div>
     );
@@ -852,13 +1144,13 @@ export function ChatSidebar({
       />
       
       {/* Header with collapse button and hamburger menu */}
-      <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-neutral-700 h-[52px] flex-shrink-0">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-neutral-700 h-[48px] flex-shrink-0">
         <div className="flex items-center gap-2">
           <Button
             size="icon"
             variant="neumorphic-secondary"
             onClick={onToggleCollapse}
-            className="h-7 w-7"
+            className="h-9 w-9"
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
@@ -869,7 +1161,7 @@ export function ChatSidebar({
           <button
             onClick={() => setIsMenuOpen(!isMenuOpen)}
             className={cn(
-              "relative w-8 h-8 rounded-xl flex items-center justify-center transition-all duration-300",
+              "relative w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-300",
               // Neumorphic styling
               "bg-gray-50 dark:bg-neutral-950",
               isMenuOpen
@@ -1013,6 +1305,45 @@ export function ChatSidebar({
                   )}
                 </button>
 
+                {/* Large Documents */}
+                <button
+                  onClick={() => {
+                    onTabChange("large-documents");
+                    setIsMenuOpen(false);
+                  }}
+                  className={cn(
+                    "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 mt-1",
+                    activeTab === "large-documents"
+                      ? "bg-gray-100 dark:bg-neutral-800 shadow-[inset_2px_2px_4px_rgba(0,0,0,0.05),inset_-2px_-2px_4px_rgba(255,255,255,0.8)] dark:shadow-[inset_2px_2px_4px_rgba(0,0,0,0.3),inset_-2px_-2px_4px_rgba(255,255,255,0.02)]"
+                      : "hover:bg-gray-50 dark:hover:bg-neutral-800/50"
+                  )}
+                >
+                  <div className={cn(
+                    "w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-200",
+                    activeTab === "large-documents"
+                      ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/30"
+                      : "bg-gray-100 dark:bg-neutral-800 text-gray-500 dark:text-neutral-400"
+                  )}>
+                    <FileStack className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 text-left">
+                    <p className={cn(
+                      "text-sm font-medium",
+                      activeTab === "large-documents"
+                        ? "text-gray-900 dark:text-neutral-100"
+                        : "text-gray-700 dark:text-neutral-300"
+                    )}>
+                      Large Documents
+                    </p>
+                    <p className="text-xs text-gray-400 dark:text-neutral-500">
+                      RAG document search
+                    </p>
+                  </div>
+                  {activeTab === "large-documents" && (
+                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  )}
+                </button>
+
                 {/* Visualization */}
                 <button
                   onClick={() => {
@@ -1071,6 +1402,7 @@ export function ChatSidebar({
             <Button
               onClick={onNewChat}
               variant="neumorphic-primary"
+              size="lg"
               className="w-full justify-start gap-2"
             >
               <MessageSquarePlus className="h-4 w-4" />
@@ -1115,6 +1447,9 @@ export function ChatSidebar({
       ) : activeTab === "knowledge" ? (
         /* Knowledge Browser Tab */
         <KnowledgeBrowser ref={knowledgeBrowserRef} className="flex-1" />
+      ) : activeTab === "large-documents" ? (
+        /* Large Documents Tab */
+        <LargeDocumentBrowser className="flex-1" />
       ) : (
         /* Embeddings Viewer Tab with KB/Chats subtabs */
         <div className="flex flex-col flex-1 overflow-hidden">
@@ -1158,6 +1493,7 @@ export function ChatSidebar({
       <div className="p-3 border-t border-gray-200 dark:border-neutral-700">
         <Button
           variant="neumorphic-secondary"
+          size="lg"
           className="w-full justify-start gap-2"
           onClick={() => setShowSettings(true)}
         >
@@ -1169,10 +1505,12 @@ export function ChatSidebar({
       {/* Settings Panel */}
       <SettingsPanel
         isOpen={showSettings}
-        onClose={() => setShowSettings(false)}
+        onClose={handleSettingsClose}
         onClearAll={onClearAll}
         hasConversations={conversations.length > 0}
+        isOwner={isOwner}
+        onApiKeysChange={onApiKeysChange}
       />
     </div>
   );
-}
+});

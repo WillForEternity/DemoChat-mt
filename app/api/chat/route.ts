@@ -17,17 +17,15 @@
  * These are included in Claude's system prompt with XML structure at the top
  * for improved retrieval accuracy (research shows up to 30% improvement).
  *
- * SETUP REQUIRED:
- * ---------------
- * Create a .env.local file in the project root with your Anthropic API key:
- *
- *   ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
- *
- * Get your API key at: https://console.anthropic.com/settings/keys
+ * AUTHENTICATION & BYOK:
+ * ----------------------
+ * - Owner emails (set in OWNER_EMAILS env var) get free access using env API keys
+ * - Other users must provide their own API keys via the request body
  */
 
 import { createAgentUIStreamResponse } from "ai";
 import { createChatAgent } from "@/agents";
+import { getAuthContext, resolveApiKey, createApiKeyRequiredResponse } from "@/lib/auth-helper";
 
 // Maximum duration for the API route (in seconds)
 // Increase this if your agent performs long-running operations
@@ -36,21 +34,19 @@ export const maxDuration = 60;
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { messages, rootFolders, kbSummary, modelTier } = body;
+    const { messages, rootFolders, kbSummary, modelTier, anthropicApiKey: userKey, useFreeTrial } = body;
     
-    console.log("[Chat API] Received modelTier:", modelTier);
+    console.log("[Chat API] Received modelTier:", modelTier, "useFreeTrial:", useFreeTrial);
 
-    // Get API key from environment variable
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    // Check authentication and owner status
+    const { isOwner } = await getAuthContext();
+
+    // Resolve which API key to use
+    // Free trial users (useFreeTrial=true) get to use the environment key
+    const apiKey = resolveApiKey(isOwner, userKey, process.env.ANTHROPIC_API_KEY, useFreeTrial === true);
 
     if (!apiKey) {
-      return new Response(
-        JSON.stringify({
-          error:
-            "ANTHROPIC_API_KEY is not set. Please create a .env.local file with your API key. See README.md for instructions.",
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return createApiKeyRequiredResponse();
     }
 
     // Create the agent with the API key, Knowledge Base root folders, KB summary, and model tier

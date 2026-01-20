@@ -119,6 +119,9 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    font-size: 80%; /* Scale down entire UI (equivalent to Cmd - twice in browser) */
+  }
   body {
     @apply bg-background text-foreground font-sans antialiased;
   }
