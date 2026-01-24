@@ -2821,15 +2821,11 @@ function formatTokenCount(count: number): string {
 /**
  * Streaming-aware markdown content component.
  * 
- * PERFORMANCE STRATEGY:
- * - During active streaming: Show plain text only (no markdown parsing at all)
- * - After streaming stops: Render full markdown with syntax highlighting
- * 
- * This prevents the browser from freezing when receiving large amounts of text,
- * as ReactMarkdown + SyntaxHighlighter are very expensive to run on every update.
- * 
- * The key insight is that we NEVER parse markdown during streaming - we just
- * display the raw text. This makes streaming smooth even for very long responses.
+ * PERFORMANCE STRATEGY (Updated for line-based streaming):
+ * - With smoothStream({ chunking: "line" }) on the server, updates arrive per-line
+ *   instead of per-token, making real-time markdown rendering feasible
+ * - Markdown and LaTeX are now rendered in real-time during streaming
+ * - The line-based chunking reduces re-render frequency significantly
  */
 interface StreamingMarkdownContentProps {
   text: string;
@@ -2837,35 +2833,16 @@ interface StreamingMarkdownContentProps {
 }
 
 /**
- * Plain text component for streaming - extremely lightweight
- * Just renders text with whitespace preserved, no parsing at all
- */
-const PlainTextContent = React.memo(
-  function PlainTextContent({ text }: { text: string }) {
-    return (
-      <div className="max-w-none font-sans text-[15px] leading-7 text-gray-700 dark:text-neutral-300 whitespace-pre-wrap">
-        {text}
-      </div>
-    );
-  },
-  (prev, next) => prev.text === next.text
-);
-
-/**
  * Main streaming-aware component
- * Switches between plain text (during streaming) and markdown (after complete)
+ * Now renders markdown in real-time since line-based chunking reduces update frequency
  */
 const StreamingMarkdownContent = React.memo(
-  function StreamingMarkdownContent({ text, isStreaming }: StreamingMarkdownContentProps) {
-    // During streaming, render plain text only - no markdown parsing
-    if (isStreaming) {
-      return <PlainTextContent text={text} />;
-    }
-    
+  function StreamingMarkdownContent({ text, isStreaming: _isStreaming }: StreamingMarkdownContentProps) {
     // Preprocess to convert ```math to ```mathblock before markdown parsing
     const processedText = preprocessMathCodeBlocks(text);
     
-    // After streaming ends, render full markdown
+    // With line-based chunking, we can now render markdown in real-time
+    // Updates come per-line instead of per-token, so performance is acceptable
     return (
       <div className="max-w-none font-sans text-[15px] leading-7 text-gray-700 dark:text-neutral-300">
         <ReactMarkdown 
@@ -2878,10 +2855,8 @@ const StreamingMarkdownContent = React.memo(
       </div>
     );
   },
-  // Custom comparison - re-render if text or streaming status changed
-  (prevProps, nextProps) => 
-    prevProps.text === nextProps.text && 
-    prevProps.isStreaming === nextProps.isStreaming
+  // Custom comparison - re-render if text changed
+  (prevProps, nextProps) => prevProps.text === nextProps.text
 );
 
 // Legacy memoized component for non-streaming contexts (kept for compatibility)

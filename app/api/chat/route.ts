@@ -23,7 +23,7 @@
  * - Other users must provide their own API keys via the request body
  */
 
-import { createAgentUIStreamResponse } from "ai";
+import { createAgentUIStreamResponse, smoothStream } from "ai";
 import { createChatAgent } from "@/agents";
 import { getAuthContext, resolveApiKey, createApiKeyRequiredResponse } from "@/lib/auth-helper";
 
@@ -58,9 +58,11 @@ export async function POST(req: Request) {
 
     // Return a streaming response using the v6 agent pattern
     // This handles the full tool execution loop automatically
+    // Using smoothStream with line-based chunking for better readability
     return createAgentUIStreamResponse({
       agent,
       uiMessages,
+      experimental_transform: smoothStream({ chunking: "line" }),
     });
   } catch (error) {
     console.error("[Chat API] Error:", error);
