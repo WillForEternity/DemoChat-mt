@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import type { ChatConversation, ChatHistoryState } from "@/lib/chat-types";
+import type { UIMessage } from "ai";
 import { embedChatIfChanged, deleteChatEmbeddings } from "./chat-embeddings-ops";
 
 const DB_NAME = "chat_history_v1";
@@ -45,6 +46,80 @@ function normalizeState(state: ChatHistoryState): ChatHistoryState {
       (a, b) => b.updatedAt - a.updatedAt
     ),
     activeConversationId: state.activeConversationId ?? null,
+  };
+}
+
+/**
+ * Check if a value is a non-serializable object (File, Blob, ArrayBuffer, etc.)
+ * These cannot be stored in IndexedDB and will cause errors.
+ */
+function isNonSerializable(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value !== "object") return false;
+  
+  // Check for common non-serializable types
+  if (typeof File !== "undefined" && value instanceof File) return true;
+  if (typeof Blob !== "undefined" && value instanceof Blob) return true;
+  if (typeof ArrayBuffer !== "undefined" && value instanceof ArrayBuffer) return true;
+  if (typeof Uint8Array !== "undefined" && value instanceof Uint8Array) return true;
+  
+  return false;
+}
+
+/**
+ * Deep clone a value while removing non-serializable objects.
+ * This ensures messages can be safely stored in IndexedDB.
+ */
+function sanitizeValue(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  
+  // Remove non-serializable objects entirely
+  if (isNonSerializable(value)) {
+    return undefined;
+  }
+  
+  // Handle arrays
+  if (Array.isArray(value)) {
+    return value.map(sanitizeValue).filter((v) => v !== undefined);
+  }
+  
+  // Handle plain objects
+  if (typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      // Skip properties that hold File/Blob objects
+      // Common patterns: 'file', 'blob', 'buffer', 'arrayBuffer'
+      if (key === "file" && isNonSerializable(val)) {
+        continue;
+      }
+      const sanitized = sanitizeValue(val);
+      if (sanitized !== undefined) {
+        result[key] = sanitized;
+      }
+    }
+    return result;
+  }
+  
+  // Primitives are safe
+  return value;
+}
+
+/**
+ * Sanitize a UIMessage to remove non-serializable data.
+ * This is necessary because the AI SDK may include File/Blob objects
+ * in message parts (e.g., for image uploads) that IndexedDB cannot store.
+ */
+function sanitizeMessage(message: UIMessage): UIMessage {
+  return sanitizeValue(message) as UIMessage;
+}
+
+/**
+ * Sanitize a conversation's messages to ensure they can be stored in IndexedDB.
+ */
+function sanitizeConversation(conversation: ChatConversation): ChatConversation {
+  return {
+    ...conversation,
+    messages: conversation.messages.map(sanitizeMessage),
   };
 }
 
@@ -154,12 +229,16 @@ export async function saveChatState(state: ChatHistoryState): Promise<void> {
   const db = await getDb();
   const normalized = normalizeState(state);
 
+  // Sanitize all conversations to remove non-serializable data (File, Blob, etc.)
+  // This prevents IndexedDB errors when storing messages with image uploads
+  const sanitizedConversations = normalized.conversations.map(sanitizeConversation);
+
   const tx = db.transaction([STORE_CONVERSATIONS, STORE_META], "readwrite");
   const conversationStore = tx.objectStore(STORE_CONVERSATIONS);
   const existingKeys = await conversationStore.getAllKeys();
-  const nextKeys = new Set(normalized.conversations.map((conv) => conv.id));
+  const nextKeys = new Set(sanitizedConversations.map((conv) => conv.id));
 
-  normalized.conversations.forEach((conversation) => {
+  sanitizedConversations.forEach((conversation) => {
     conversationStore.put(conversation);
   });
 
@@ -182,7 +261,7 @@ export async function saveChatState(state: ChatHistoryState): Promise<void> {
 
   // Auto-embed conversations in background (non-blocking)
   // Uses hash-based caching so unchanged content won't re-embed
-  for (const conversation of normalized.conversations) {
+  for (const conversation of sanitizedConversations) {
     embedChatIfChanged(conversation).catch((error) => {
       console.error("[ChatStore] Failed to embed conversation:", error);
     });

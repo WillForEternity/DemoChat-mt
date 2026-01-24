@@ -105,3 +105,19 @@ export type {
   TraversalOptions,
   AdjacencyList,
 } from "./links/types";
+
+// Backup & restore exports
+export {
+  exportKnowledgeBase,
+  downloadKnowledgeBackup,
+  importKnowledgeBase,
+  importFromFile,
+  parseBackupFile,
+} from "./backup";
+
+export type {
+  KnowledgeBackup,
+  ExportedFile,
+  ExportedLink,
+  ImportResult,
+} from "./backup";

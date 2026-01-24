@@ -1132,7 +1132,6 @@ import { DocumentSearchView, DocumentListView } from "@/components/tools/documen
 import { GenericToolView } from "@/components/tools/generic-tool-view";
 import { ContextSaverView, type ParallelTask } from "@/components/tools/context-saver-view";
 import { AgentOrchestratorView, MAX_AGENTS, type OrchestratorState, type AgentTask, type AgentStatus } from "@/components/tools/agent-orchestrator-view";
-import { PdfExportView } from "@/components/tools/pdf-export-view";
 
 // =============================================================================
 // INLINE ICON SUPPORT FOR MARKDOWN
@@ -3907,7 +3906,7 @@ ${content}
             break;
           }
           case "kb_search": {
-            // Hybrid search (lexical + semantic + RRF) across knowledge base with optional reranking
+            // keyword + vector search -> reciprocal rank fusion -> llm reranking
             const query = args.query as string;
             const topK = Math.min((args.topK as number) || 5, 25);
             const results = await kb.hybridSearch(query, { 
@@ -3942,7 +3941,7 @@ ${r.chunkText}
             break;
           }
           case "chat_search": {
-            // Hybrid search across chat history (lexical + semantic + RRF)
+            // keyword + vector search -> reciprocal rank fusion -> llm reranking
             const { chatHybridSearch } = await import("@/lib/storage/chat-hybrid-search");
             const query = args.query as string;
             const topK = Math.min((args.topK as number) || 5, 25);
@@ -3978,7 +3977,7 @@ ${r.chunkText}
             break;
           }
           case "document_search": {
-            // Hybrid search across uploaded large documents (lexical + semantic + RRF)
+            // keyword + vector search -> reciprocal rank fusion -> llm reranking
             const { searchLargeDocuments, searchLargeDocument } = await import("@/knowledge/large-documents");
             const query = args.query as string;
             const topK = Math.min((args.topK as number) || 10, 25);
@@ -4102,22 +4101,6 @@ ${n.links.incoming.length > 0 ? `<incoming>${n.links.incoming.map((l) => `<link 
 </node>`).join("\n")}
 </graph_traversal>`;
             output = { graph_xml: xmlOutput, ...result };
-            break;
-          }
-          // =============================================================================
-          // PDF EXPORT TOOL
-          // =============================================================================
-          case "pdf_export": {
-            // Export recent chat messages as PDF with markdown/LaTeX formatting
-            const { generateChatPdf } = await import("@/lib/pdf-generator");
-            const result = await generateChatPdf(messages, {
-              filename: args.filename as string | undefined,
-              title: args.title as string | undefined,
-              messageCount: args.messageCount as number | undefined,
-              includeUserMessages: args.includeUserMessages as boolean | undefined,
-              includeAssistantMessages: args.includeAssistantMessages as boolean | undefined,
-            });
-            output = result;
             break;
           }
           default:
@@ -4994,11 +4977,6 @@ ${n.links.incoming.length > 0 ? `<incoming>${n.links.incoming.map((l) => `<link 
     // Document list tool - lists all uploaded documents
     if (toolName === "document_list") {
       return <DocumentListView key={index} invocation={invocation} />;
-    }
-
-    // PDF export tool - exports chat as PDF with markdown/LaTeX rendering
-    if (toolName === "pdf_export") {
-      return <PdfExportView key={index} invocation={invocation} />;
     }
 
     // All other tools - use generic neumorphic UI

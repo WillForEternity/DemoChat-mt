@@ -9,8 +9,8 @@
  */
 
 import { useState, useEffect, useCallback, useImperativeHandle, forwardRef, useRef } from "react";
-import { ChevronRight, ChevronDown, FileText, Folder, X, Trash2, RefreshCw } from "lucide-react";
-import { getTree, readFile, deleteNode, reindexAllFiles, getEmbeddingStats, migrateFromV2NameIfNeeded, type KnowledgeTree } from "@/knowledge";
+import { ChevronRight, ChevronDown, FileText, Folder, X, Trash2, RefreshCw, Download, Upload, Check, AlertCircle } from "lucide-react";
+import { getTree, readFile, deleteNode, reindexAllFiles, getEmbeddingStats, migrateFromV2NameIfNeeded, downloadKnowledgeBackup, importFromFile, type KnowledgeTree, type ImportResult } from "@/knowledge";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import ReactMarkdown from "react-markdown";
@@ -118,6 +118,17 @@ export const KnowledgeBrowser = forwardRef<KnowledgeBrowserRef, KnowledgeBrowser
       totalFiles: number;
     } | null>(null);
 
+    // Import/Export state
+    const [isExporting, setIsExporting] = useState(false);
+    const [isImporting, setIsImporting] = useState(false);
+    const [importProgress, setImportProgress] = useState<{
+      current: number;
+      total: number;
+      currentItem: string;
+    } | null>(null);
+    const [importResult, setImportResult] = useState<ImportResult | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
     const loadTree = useCallback(async () => {
       setIsLoading(true);
       try {
@@ -164,6 +175,70 @@ export const KnowledgeBrowser = forwardRef<KnowledgeBrowserRef, KnowledgeBrowser
         setReindexProgress(null);
       }
     }, []);
+
+    // Handle KB export
+    const handleExport = useCallback(async () => {
+      setIsExporting(true);
+      try {
+        await downloadKnowledgeBackup();
+        console.log("[Export] Complete");
+      } catch (error) {
+        console.error("[Export] Failed:", error);
+      } finally {
+        setIsExporting(false);
+      }
+    }, []);
+
+    // Handle KB import
+    const handleImport = useCallback(async (file: File) => {
+      setIsImporting(true);
+      setImportResult(null);
+      setImportProgress({ current: 0, total: 0, currentItem: "Starting..." });
+
+      try {
+        const result = await importFromFile(file, {
+          overwrite: false, // Don't overwrite existing files
+          reindex: true,    // Re-embed imported files
+          onProgress: (current, total, currentItem) => {
+            setImportProgress({ current, total, currentItem });
+          },
+        });
+
+        setImportResult(result);
+        console.log("[Import] Complete:", result);
+
+        // Refresh the tree and stats
+        await loadTree();
+        const stats = await getEmbeddingStats();
+        setEmbeddingStats(stats);
+
+        // Clear result after 5 seconds
+        setTimeout(() => setImportResult(null), 5000);
+      } catch (error) {
+        console.error("[Import] Failed:", error);
+        setImportResult({
+          success: false,
+          filesImported: 0,
+          filesSkipped: 0,
+          linksImported: 0,
+          linksSkipped: 0,
+          errors: [error instanceof Error ? error.message : String(error)],
+        });
+      } finally {
+        setIsImporting(false);
+        setImportProgress(null);
+      }
+    }, [loadTree]);
+
+    // Handle file input change
+    const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) {
+        handleImport(file);
+      }
+      // Reset input so same file can be selected again
+      e.target.value = "";
+    }, [handleImport]);
 
     // Expose refresh method to parent
     useImperativeHandle(ref, () => ({
@@ -320,7 +395,16 @@ export const KnowledgeBrowser = forwardRef<KnowledgeBrowserRef, KnowledgeBrowser
 
     return (
       <div className={cn("flex flex-col h-full", className)}>
-        {/* Reindex bar */}
+        {/* Hidden file input for import */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json"
+          onChange={handleFileInputChange}
+          className="hidden"
+        />
+
+        {/* Toolbar bar */}
         <div className="px-3 py-2 border-b border-gray-200 dark:border-neutral-700 bg-gray-50/50 dark:bg-neutral-900/50">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -330,23 +414,58 @@ export const KnowledgeBrowser = forwardRef<KnowledgeBrowserRef, KnowledgeBrowser
                 </span>
               )}
             </div>
-            <button
-              onClick={handleReindex}
-              disabled={isReindexing}
-              className={cn(
-                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all",
-                isReindexing
-                  ? "bg-fuchsia-100 dark:bg-fuchsia-900/30 text-fuchsia-600 dark:text-[#ff00ff] cursor-wait"
-                  : "bg-fuchsia-50 dark:bg-fuchsia-900/20 text-fuchsia-600 dark:text-[#ff00ff] hover:bg-fuchsia-100 dark:hover:bg-fuchsia-900/40"
-              )}
-              title="Reindex all files for semantic search"
-            >
-              <RefreshCw className={cn("w-3.5 h-3.5", isReindexing && "animate-spin")} />
-              {isReindexing ? "Indexing..." : "Reindex All"}
-            </button>
+            <div className="flex items-center gap-1.5">
+              {/* Export button */}
+              <button
+                onClick={handleExport}
+                disabled={isExporting || isImporting}
+                className={cn(
+                  "flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all",
+                  isExporting
+                    ? "bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 cursor-wait"
+                    : "bg-gray-100 dark:bg-neutral-800 text-gray-600 dark:text-neutral-400 hover:bg-gray-200 dark:hover:bg-neutral-700"
+                )}
+                title="Export knowledge base as JSON backup"
+              >
+                <Download className={cn("w-3.5 h-3.5", isExporting && "animate-pulse")} />
+                <span className="hidden sm:inline">Export</span>
+              </button>
+
+              {/* Import button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isImporting || isExporting}
+                className={cn(
+                  "flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all",
+                  isImporting
+                    ? "bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 cursor-wait"
+                    : "bg-gray-100 dark:bg-neutral-800 text-gray-600 dark:text-neutral-400 hover:bg-gray-200 dark:hover:bg-neutral-700"
+                )}
+                title="Import knowledge base from JSON backup"
+              >
+                <Upload className={cn("w-3.5 h-3.5", isImporting && "animate-pulse")} />
+                <span className="hidden sm:inline">Import</span>
+              </button>
+
+              {/* Reindex button */}
+              <button
+                onClick={handleReindex}
+                disabled={isReindexing || isImporting}
+                className={cn(
+                  "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all",
+                  isReindexing
+                    ? "bg-fuchsia-100 dark:bg-fuchsia-900/30 text-fuchsia-600 dark:text-[#ff00ff] cursor-wait"
+                    : "bg-fuchsia-50 dark:bg-fuchsia-900/20 text-fuchsia-600 dark:text-[#ff00ff] hover:bg-fuchsia-100 dark:hover:bg-fuchsia-900/40"
+                )}
+                title="Reindex all files for semantic search"
+              >
+                <RefreshCw className={cn("w-3.5 h-3.5", isReindexing && "animate-spin")} />
+                {isReindexing ? "Indexing..." : "Reindex"}
+              </button>
+            </div>
           </div>
           
-          {/* Progress bar */}
+          {/* Reindex progress bar */}
           {isReindexing && reindexProgress && (
             <div className="mt-2">
               <div className="flex items-center justify-between text-xs text-gray-500 dark:text-neutral-400 mb-1">
@@ -363,6 +482,49 @@ export const KnowledgeBrowser = forwardRef<KnowledgeBrowserRef, KnowledgeBrowser
                   }}
                 />
               </div>
+            </div>
+          )}
+
+          {/* Import progress bar */}
+          {isImporting && importProgress && (
+            <div className="mt-2">
+              <div className="flex items-center justify-between text-xs text-gray-500 dark:text-neutral-400 mb-1">
+                <span className="truncate max-w-[70%]">{importProgress.currentItem}</span>
+                <span>{importProgress.current}/{importProgress.total}</span>
+              </div>
+              <div className="h-1.5 bg-gray-200 dark:bg-neutral-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-green-500 dark:bg-green-400 transition-all duration-300 ease-out"
+                  style={{
+                    width: importProgress.total > 0
+                      ? `${(importProgress.current / importProgress.total) * 100}%`
+                      : "0%",
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Import result notification */}
+          {importResult && (
+            <div className={cn(
+              "mt-2 flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs",
+              importResult.success
+                ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400"
+                : "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400"
+            )}>
+              {importResult.success ? (
+                <Check className="w-3.5 h-3.5 flex-shrink-0" />
+              ) : (
+                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+              )}
+              <span>
+                {importResult.success
+                  ? `Imported ${importResult.filesImported} files, ${importResult.linksImported} links`
+                  : `Import failed: ${importResult.errors[0]}`
+                }
+                {importResult.filesSkipped > 0 && ` (${importResult.filesSkipped} skipped)`}
+              </span>
             </div>
           )}
         </div>

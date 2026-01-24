@@ -233,15 +233,15 @@ function SearchResults({
             )}
           >
             <p className="text-[10px] text-gray-500 dark:text-neutral-400 text-center leading-relaxed">
-              <span className="font-medium">Lexical</span>
+              <span className="font-medium">Keyword</span>
               <span className="mx-1 text-gray-300 dark:text-neutral-600">+</span>
-              <span className="font-medium">Semantic</span>
+              <span className="font-medium">Vector Search</span>
               <span className="mx-1.5 text-gray-300 dark:text-neutral-600">→</span>
-              <span className="font-medium">RRF Fusion</span>
+              <span className="font-medium">Reciprocal Rank Fusion</span>
               {results.some((r) => r.reranked) && (
                 <>
                   <span className="mx-1.5 text-gray-300 dark:text-neutral-600">→</span>
-                  <span className="font-medium">Reranked</span>
+                  <span className="font-medium">LLM Reranking</span>
                 </>
               )}
             </p>

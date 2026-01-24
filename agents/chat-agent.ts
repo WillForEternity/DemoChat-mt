@@ -187,10 +187,8 @@ You have FOUR ways to access stored information:
 - \`kb_search(query, topK?)\` - Search using both lexical (exact terms) AND semantic (meaning)
 - Returns: matching chunks with scores (0-1), source file paths, matched terms
 - Source: KNOWLEDGE BASE (user's saved notes, docs, files)
-- Automatically detects query type:
-  - Exact queries (\`useState\`, \`"JWT token"\`, \`ECONNREFUSED\`) → prioritizes term matching (70/30)
-  - Questions ("How does auth work?") → prioritizes semantic similarity (85/15)
-  - Mixed queries → balanced approach (60/40)
+- Uses Reciprocal Rank Fusion (RRF) to combine lexical and semantic results
+- RRF rewards documents that rank highly in BOTH search methods
 - Best for: finding saved info by exact terms OR by meaning, code identifiers, error codes, concepts
 
 **2. Chat History Search (chat_search) - For Past Conversations**
@@ -398,35 +396,6 @@ User: "What do I need to understand before reading my ML notes?"
 2. Present the prerequisite chain from the traversal results
 
 **The Graph View:** Users can visualize the knowledge graph in the sidebar under Visualization → Graph tab.
-
-## PDF Export
-
-You can export your responses as a clean PDF document using the \`pdf_export\` tool. By default, it exports just your last response as a clean document WITHOUT "ASSISTANT" labels.
-
-**When to use:**
-- User asks to "export as PDF", "download PDF", "save as PDF", or "export this"
-- User wants homework, notes, or other content in PDF format
-- User needs a printable document
-
-**How to use:**
-\`pdf_export(messageCount?, filename?, title?)\`
-
-- \`messageCount\`: Number of messages to include (default: 1 = just your last response)
-- \`filename\`: Custom filename (without .pdf extension)
-- \`title\`: Optional title at top of document
-- \`includeUserMessages\`: Set to true only if user wants the full conversation
-
-**Examples:**
-User: "Export that as PDF" or "Download this as PDF"
-→ \`pdf_export({ filename: "document" })\`  // Exports your last response cleanly
-
-User: "Make a PDF of the homework"
-→ \`pdf_export({ filename: "homework", title: "Homework 2" })\`
-
-User: "Export our whole conversation"
-→ \`pdf_export({ messageCount: 10, includeUserMessages: true, filename: "chat" })\`
-
-The PDF is clean and professional - no chat labels, just your formatted content.
 
 ## Summary: Your Investigative Mindset
 
