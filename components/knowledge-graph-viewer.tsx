@@ -52,11 +52,13 @@ interface ViewState {
 
 const MIN_SCALE_ABSOLUTE = 0.02; // Absolute minimum, never go below this
 const MAX_SCALE = 4;
-const NODE_PADDING_X = 12;
-const NODE_PADDING_Y = 8;
-const NODE_FONT_SIZE = 11;
-const NODE_BORDER_RADIUS = 6;
-const CATEGORY_ACCENT_WIDTH = 4;
+const NODE_PADDING_X = 6;
+const NODE_PADDING_Y = 4;
+const NODE_FONT_SIZE = 10; // Smaller for less crowding
+const NODE_BORDER_RADIUS = 4;
+const CATEGORY_ACCENT_WIDTH = 3;
+const NODE_MAX_LINE_WIDTH = 60; // Narrower nodes
+const NODE_LINE_HEIGHT = 1.15; // Tighter line height
 
 // Color palette for folders/categories - same as embeddings-viewer for consistency
 const FOLDER_COLORS = [
@@ -113,9 +115,65 @@ function getFileName(path: string): string {
   return name.replace(/\.[^/.]+$/, "");
 }
 
-function truncateLabel(text: string, maxLen: number = 12): string {
+function truncateLabel(text: string, maxLen: number = 24): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen - 1) + "…";
+}
+
+/**
+ * Wrap text into multiple lines based on max width.
+ * Returns an array of lines.
+ */
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const words = text.split(/(?=[A-Z])|[-_\s]+/).filter(Boolean); // Split on camelCase, hyphens, underscores, spaces
+  
+  // If it's a single short word, just return it
+  if (words.length === 1) {
+    const measured = ctx.measureText(text);
+    if (measured.width <= maxWidth) {
+      return [text];
+    }
+    // If single word is too long, try to split it
+    const lines: string[] = [];
+    let currentLine = "";
+    for (const char of text) {
+      const testLine = currentLine + char;
+      if (ctx.measureText(testLine).width > maxWidth && currentLine.length > 0) {
+        lines.push(currentLine);
+        currentLine = char;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    return lines.length > 0 ? lines : [text];
+  }
+  
+  const lines: string[] = [];
+  let currentLine = "";
+  
+  for (const word of words) {
+    const testLine = currentLine ? currentLine + word : word;
+    const metrics = ctx.measureText(testLine);
+    
+    if (metrics.width > maxWidth && currentLine) {
+      lines.push(currentLine.trim());
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+  
+  if (currentLine.trim()) {
+    lines.push(currentLine.trim());
+  }
+  
+  // Limit to 3 lines max
+  if (lines.length > 3) {
+    return [...lines.slice(0, 2), lines.slice(2).join("").slice(0, 10) + "…"];
+  }
+  
+  return lines.length > 0 ? lines : [text];
 }
 
 // Convert hex to rgba for transparency
@@ -212,9 +270,9 @@ class ForceSimulation {
     
     const nodes = Array.from(this.nodes.values());
     const damping = 0.88;
-    const repulsion = 0.025;
-    const attraction = 0.035;
-    const centerForce = 0.002;
+    const repulsion = 0.04; // Moderate repulsion
+    const attraction = 0.02; // Balanced attraction
+    const centerForce = 0.003;
     
     // Apply forces
     for (const node of nodes) {
@@ -247,7 +305,7 @@ class ForceSimulation {
       const dy = target.y - source.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
       // Dynamic ideal distance based on node sizes
-      const idealDist = 0.35 + (source.connections + target.connections) * 0.02;
+      const idealDist = 0.4 + (source.connections + target.connections) * 0.02;
       const force = (dist - idealDist) * attraction * this.alpha;
       
       const fx = (dx / dist) * force;
@@ -267,6 +325,45 @@ class ForceSimulation {
       node.x += node.vx;
       node.y += node.vy;
       totalVelocity += Math.abs(node.vx) + Math.abs(node.vy);
+    }
+    
+    // Collision detection - prevent nodes from overlapping
+    // Minimum separation in normalized coordinates (roughly 10px at default zoom)
+    const minSeparation = 0.12; // Adjust based on typical node size
+    const collisionIterations = 3; // Multiple passes for better separation
+    
+    for (let iter = 0; iter < collisionIterations; iter++) {
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const nodeA = nodes[i];
+          const nodeB = nodes[j];
+          
+          const dx = nodeB.x - nodeA.x;
+          const dy = nodeB.y - nodeA.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
+          
+          // Calculate required separation based on node sizes (approximate)
+          const labelA = getFileName(nodeA.id);
+          const labelB = getFileName(nodeB.id);
+          const sizeA = Math.min(labelA.length * 0.012, 0.15) + 0.05;
+          const sizeB = Math.min(labelB.length * 0.012, 0.15) + 0.05;
+          const requiredDist = sizeA + sizeB + minSeparation;
+          
+          if (dist < requiredDist) {
+            // Push nodes apart
+            const overlap = requiredDist - dist;
+            const pushX = (dx / dist) * overlap * 0.5;
+            const pushY = (dy / dist) * overlap * 0.5;
+            
+            nodeA.x -= pushX;
+            nodeA.y -= pushY;
+            nodeB.x += pushX;
+            nodeB.y += pushY;
+            
+            totalVelocity += overlap; // Keep simulation running if collisions exist
+          }
+        }
+      }
     }
     
     // Cool down
@@ -528,8 +625,13 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
 
             for (const node of nodes) {
               const label = getFileName(node.id);
-              const nodeHalfWidth = (label.length * NODE_FONT_SIZE * 0.6 + NODE_PADDING_X * 2) / 2 / baseScale;
-              const nodeHalfHeight = (NODE_FONT_SIZE + NODE_PADDING_Y * 2) / 2 / baseScale;
+              const charWidth = NODE_FONT_SIZE * 0.55;
+              const totalWidth = label.length * charWidth;
+              const estimatedLines = Math.max(1, Math.ceil(totalWidth / NODE_MAX_LINE_WIDTH));
+              const lineWidth = estimatedLines > 1 ? NODE_MAX_LINE_WIDTH : totalWidth;
+              const nodeHalfWidth = (lineWidth + NODE_PADDING_X * 2 + CATEGORY_ACCENT_WIDTH) / 2 / baseScale;
+              const lineHeight = NODE_FONT_SIZE * NODE_LINE_HEIGHT;
+              const nodeHalfHeight = ((estimatedLines * lineHeight) + NODE_PADDING_Y * 2) / 2 / baseScale;
               
               minX = Math.min(minX, node.x - nodeHalfWidth);
               maxX = Math.max(maxX, node.x + nodeHalfWidth);
@@ -567,11 +669,26 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
   const getNodeDimensions = useCallback((node: GraphNodeData, scale: number) => {
     // Approximate text width (we can't use canvas context here easily)
     const label = getFileName(node.id);
-    const fontSize = NODE_FONT_SIZE * Math.min(1.1, scale);
+    // Scale linearly with zoom but at a reduced rate (0.4x) plus a base size
+    // This ensures nodes always grow with zoom but don't get too small when zoomed out
+    const effectiveScale = 0.6 + scale * 0.4;
+    
+    const fontSize = NODE_FONT_SIZE * effectiveScale;
+    const scaledPaddingX = NODE_PADDING_X * effectiveScale;
+    const scaledPaddingY = NODE_PADDING_Y * effectiveScale;
+    const scaledAccentWidth = CATEGORY_ACCENT_WIDTH * effectiveScale;
+    const scaledMaxLineWidth = NODE_MAX_LINE_WIDTH * effectiveScale;
     // Approximate character width
-    const charWidth = fontSize * 0.6;
-    const width = label.length * charWidth + NODE_PADDING_X * 2;
-    const height = fontSize + NODE_PADDING_Y * 2;
+    const charWidth = fontSize * 0.55;
+    
+    // Estimate number of lines (approximate - actual wrapping happens in draw)
+    const totalWidth = label.length * charWidth;
+    const estimatedLines = Math.max(1, Math.ceil(totalWidth / scaledMaxLineWidth));
+    const lineWidth = estimatedLines > 1 ? scaledMaxLineWidth : totalWidth;
+    
+    const width = lineWidth + scaledPaddingX * 2 + scaledAccentWidth;
+    const lineHeight = fontSize * NODE_LINE_HEIGHT;
+    const height = (estimatedLines * lineHeight) + scaledPaddingY * 2;
     return { width, height };
   }, []);
 
@@ -637,10 +754,24 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
     // Helper to get approximate node dimensions for edge calculation
     const getApproxNodeSize = (node: GraphNodeData) => {
       const label = getFileName(node.id);
-      const fontSize = NODE_FONT_SIZE * Math.min(1.1, viewState.scale);
-      const charWidth = fontSize * 0.6;
-      const w = label.length * charWidth + NODE_PADDING_X * 2;
-      const h = fontSize + NODE_PADDING_Y * 2;
+      // Scale linearly with zoom but at a reduced rate (0.4x) plus a base size
+      const effectiveScale = 0.6 + viewState.scale * 0.4;
+      
+      const fontSize = NODE_FONT_SIZE * effectiveScale;
+      const charWidth = fontSize * 0.55;
+      const scaledPaddingX = NODE_PADDING_X * effectiveScale;
+      const scaledPaddingY = NODE_PADDING_Y * effectiveScale;
+      const scaledAccentWidth = CATEGORY_ACCENT_WIDTH * effectiveScale;
+      const scaledMaxLineWidth = NODE_MAX_LINE_WIDTH * effectiveScale;
+      
+      // Estimate wrapping
+      const totalWidth = label.length * charWidth;
+      const estimatedLines = Math.max(1, Math.ceil(totalWidth / scaledMaxLineWidth));
+      const lineWidth = estimatedLines > 1 ? scaledMaxLineWidth : totalWidth;
+      
+      const w = lineWidth + scaledPaddingX * 2 + scaledAccentWidth;
+      const lineHeight = fontSize * NODE_LINE_HEIGHT;
+      const h = (estimatedLines * lineHeight) + scaledPaddingY * 2;
       return { w, h };
     };
 
@@ -799,15 +930,35 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
     const neumorphLightShadow = isDark ? "rgba(255, 255, 255, 0.05)" : "rgba(255, 255, 255, 0.8)";
     const neumorphDarkShadow = isDark ? "rgba(0, 0, 0, 0.3)" : "rgba(0, 0, 0, 0.08)";
 
-    // Helper to get node dimensions
-    const getNodeDimensions = (node: GraphNodeData) => {
+    // Helper to get node dimensions with text wrapping
+    const getNodeDimensionsWithWrapping = (node: GraphNodeData) => {
       const label = getFileName(node.id);
-      const fontSize = NODE_FONT_SIZE * Math.min(1.1, viewState.scale);
-      ctx.font = `500 ${fontSize}px system-ui, -apple-system, sans-serif`;
-      const metrics = ctx.measureText(label);
-      const width = metrics.width + NODE_PADDING_X * 2;
-      const height = fontSize + NODE_PADDING_Y * 2;
-      return { width, height, label, fontSize };
+      // Scale linearly with zoom but at a reduced rate (0.4x) plus a base size
+      const effectiveScale = 0.6 + viewState.scale * 0.4;
+      
+      const fontSize = NODE_FONT_SIZE * effectiveScale;
+      const scaledPaddingX = NODE_PADDING_X * effectiveScale;
+      const scaledPaddingY = NODE_PADDING_Y * effectiveScale;
+      const scaledAccentWidth = CATEGORY_ACCENT_WIDTH * effectiveScale;
+      const scaledMaxLineWidth = NODE_MAX_LINE_WIDTH * effectiveScale;
+      
+      ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
+      
+      // Wrap text to multiple lines (using scaled max width)
+      const lines = wrapText(ctx, label, scaledMaxLineWidth);
+      
+      // Find the widest line
+      let maxWidth = 0;
+      for (const line of lines) {
+        const metrics = ctx.measureText(line);
+        maxWidth = Math.max(maxWidth, metrics.width);
+      }
+      
+      const lineHeight = fontSize * NODE_LINE_HEIGHT;
+      const width = maxWidth + scaledPaddingX * 2 + scaledAccentWidth;
+      const height = (lines.length * lineHeight) + scaledPaddingY * 2;
+      const borderRadius = NODE_BORDER_RADIUS * effectiveScale;
+      return { width, height, label, fontSize, lines, lineHeight, scaledPaddingX, scaledPaddingY, scaledAccentWidth, borderRadius, effectiveScale };
     };
 
     // Helper to draw a neumorphic node
@@ -823,7 +974,7 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
       if (isHighlightPass && !isHighlighted) return;
       if (!isHighlightPass && isHighlighted) return;
       
-      const { width, height, label, fontSize } = getNodeDimensions(node);
+      const { width, height, fontSize, lines, lineHeight, scaledAccentWidth, borderRadius, effectiveScale } = getNodeDimensionsWithWrapping(node);
       const categoryColor = categoryColorMap.get(node.category) || FOLDER_COLORS[0];
       
       // Dim non-connected nodes when something is selected/hovered
@@ -832,16 +983,20 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
       // Calculate rect position (centered on x, y)
       const rectX = x - width / 2;
       const rectY = y - height / 2;
+      
+      // Scale shadow properties with dampened scale
+      const shadowBlur = 12 * effectiveScale;
+      const shadowOffset = 6 * effectiveScale;
 
       ctx.globalAlpha = shouldDim ? 0.35 : 1;
 
       // Neumorphic shadow layers (matching button style)
       if (!shouldDim) {
-        // Dark shadow (bottom-right) - 6px offset, 12px blur
+        // Dark shadow (bottom-right) - scaled offset and blur
         ctx.shadowColor = neumorphDarkShadow;
-        ctx.shadowBlur = 12;
-        ctx.shadowOffsetX = 6;
-        ctx.shadowOffsetY = 6;
+        ctx.shadowBlur = shadowBlur;
+        ctx.shadowOffsetX = shadowOffset;
+        ctx.shadowOffsetY = shadowOffset;
         
         // Draw with gradient background
         const bgGradient = ctx.createLinearGradient(rectX, rectY, rectX + width, rectY + height);
@@ -849,17 +1004,17 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
         bgGradient.addColorStop(1, neumorphBgDark);
         ctx.fillStyle = bgGradient;
         ctx.beginPath();
-        ctx.roundRect(rectX, rectY, width, height, NODE_BORDER_RADIUS);
+        ctx.roundRect(rectX, rectY, width, height, borderRadius);
         ctx.fill();
         
-        // Light shadow (top-left) - -6px offset, 12px blur
+        // Light shadow (top-left) - scaled offset and blur
         ctx.shadowColor = neumorphLightShadow;
-        ctx.shadowOffsetX = -6;
-        ctx.shadowOffsetY = -6;
-        ctx.shadowBlur = 12;
+        ctx.shadowOffsetX = -shadowOffset;
+        ctx.shadowOffsetY = -shadowOffset;
+        ctx.shadowBlur = shadowBlur;
         
         ctx.beginPath();
-        ctx.roundRect(rectX, rectY, width, height, NODE_BORDER_RADIUS);
+        ctx.roundRect(rectX, rectY, width, height, borderRadius);
         ctx.fill();
       } else {
         // Dimmed nodes - simple fill without shadows
@@ -868,7 +1023,7 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
         bgGradient.addColorStop(1, neumorphBgDark);
         ctx.fillStyle = bgGradient;
         ctx.beginPath();
-        ctx.roundRect(rectX, rectY, width, height, NODE_BORDER_RADIUS);
+        ctx.roundRect(rectX, rectY, width, height, borderRadius);
         ctx.fill();
       }
 
@@ -881,32 +1036,40 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
       // Category color accent bar (left edge)
       ctx.fillStyle = shouldDim ? hexToRgba(categoryColor, 0.4) : categoryColor;
       ctx.beginPath();
-      ctx.roundRect(rectX, rectY, CATEGORY_ACCENT_WIDTH, height, [NODE_BORDER_RADIUS, 0, 0, NODE_BORDER_RADIUS]);
+      ctx.roundRect(rectX, rectY, scaledAccentWidth, height, [borderRadius, 0, 0, borderRadius]);
       ctx.fill();
 
-      // Border for selected/hovered - subtle gray
+      // Border for selected/hovered - subtle gray (scaled line width)
       if (isSelected) {
         ctx.strokeStyle = isDark ? "#525252" : "#9ca3af"; // neutral-600 / gray-400
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2 * effectiveScale;
         ctx.beginPath();
-        ctx.roundRect(rectX, rectY, width, height, NODE_BORDER_RADIUS);
+        ctx.roundRect(rectX, rectY, width, height, borderRadius);
         ctx.stroke();
       } else if (isHovered) {
         ctx.strokeStyle = isDark ? "#404040" : "#d1d5db"; // neutral-700 / gray-300
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.5 * effectiveScale;
         ctx.beginPath();
-        ctx.roundRect(rectX, rectY, width, height, NODE_BORDER_RADIUS);
+        ctx.roundRect(rectX, rectY, width, height, borderRadius);
         ctx.stroke();
       }
 
-      // Text label (offset slightly to account for accent bar)
-      ctx.font = `500 ${fontSize}px system-ui, -apple-system, sans-serif`;
+      // Text labels - draw each line (stacked vertically)
+      ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillStyle = shouldDim 
         ? (isDark ? "#525252" : "#9ca3af")  // neutral-600 / gray-400
-        : (isDark ? "#d4d4d4" : "#374151"); // neutral-300 / gray-700
-      ctx.fillText(label, x + CATEGORY_ACCENT_WIDTH / 2, y);
+        : (isDark ? "#e5e5e5" : "#1f2937"); // neutral-200 / gray-800 - more contrast
+      
+      // Calculate starting Y position for centered text block
+      const textBlockHeight = lines.length * lineHeight;
+      const textStartY = y - (textBlockHeight / 2) + (lineHeight / 2);
+      const textCenterX = x + scaledAccentWidth / 2;
+      
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], textCenterX, textStartY + (i * lineHeight));
+      }
 
       ctx.globalAlpha = 1;
     };
@@ -1045,12 +1208,49 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setViewState((prev) => ({
-      ...prev,
-      scale: Math.max(minScale, Math.min(MAX_SCALE, prev.scale * delta)),
-    }));
-  }, [minScale]);
+    const container = containerRef.current;
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    const baseScale = Math.min(rect.width, rect.height) * 0.4;
+
+    const zoomFactor = e.deltaY > 0 ? 0.95 : 1.05; // Slower, smoother zoom
+
+    setViewState((prev) => {
+      const newScale = Math.max(minScale, Math.min(MAX_SCALE, prev.scale * zoomFactor));
+
+      // Determine zoom target: if hovering over a node, use node center; otherwise use mouse position
+      let zoomTargetX: number;
+      let zoomTargetY: number;
+
+      if (hoveredNode) {
+        // Zoom towards the center of the hovered node
+        zoomTargetX = centerX + (hoveredNode.x * baseScale * prev.scale) + prev.offsetX;
+        zoomTargetY = centerY + (hoveredNode.y * baseScale * prev.scale) + prev.offsetY;
+      } else {
+        // Zoom towards mouse position
+        zoomTargetX = e.clientX - rect.left;
+        zoomTargetY = e.clientY - rect.top;
+      }
+
+      // Calculate offset adjustment to zoom towards target position
+      // The target position in world space should remain constant
+      const worldTargetX = (zoomTargetX - centerX - prev.offsetX) / prev.scale;
+      const worldTargetY = (zoomTargetY - centerY - prev.offsetY) / prev.scale;
+
+      // New offset to keep world position under target the same
+      const newOffsetX = zoomTargetX - centerX - worldTargetX * newScale;
+      const newOffsetY = zoomTargetY - centerY - worldTargetY * newScale;
+
+      return {
+        offsetX: newOffsetX,
+        offsetY: newOffsetY,
+        scale: newScale,
+      };
+    });
+  }, [minScale, hoveredNode]);
 
   // Fit all nodes in view - calculates optimal scale and offset
   const fitToView = useCallback(() => {
@@ -1069,10 +1269,15 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
     let minY = Infinity, maxY = -Infinity;
 
     for (const node of nodes) {
-      // Account for node width (approximate)
+      // Account for node width with text wrapping
       const label = getFileName(node.id);
-      const nodeHalfWidth = (label.length * NODE_FONT_SIZE * 0.6 + NODE_PADDING_X * 2) / 2 / baseScale;
-      const nodeHalfHeight = (NODE_FONT_SIZE + NODE_PADDING_Y * 2) / 2 / baseScale;
+      const charWidth = NODE_FONT_SIZE * 0.55;
+      const totalWidth = label.length * charWidth;
+      const estimatedLines = Math.max(1, Math.ceil(totalWidth / NODE_MAX_LINE_WIDTH));
+      const lineWidth = estimatedLines > 1 ? NODE_MAX_LINE_WIDTH : totalWidth;
+      const nodeHalfWidth = (lineWidth + NODE_PADDING_X * 2 + CATEGORY_ACCENT_WIDTH) / 2 / baseScale;
+      const lineHeight = NODE_FONT_SIZE * NODE_LINE_HEIGHT;
+      const nodeHalfHeight = ((estimatedLines * lineHeight) + NODE_PADDING_Y * 2) / 2 / baseScale;
       
       minX = Math.min(minX, node.x - nodeHalfWidth);
       maxX = Math.max(maxX, node.x + nodeHalfWidth);
@@ -1113,11 +1318,11 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
   const resetView = () => {
     fitToView();
   };
-  const recomputeLayout = () => {
-    setLayoutSaved(false);
-    setCacheStatus("computing");
-    simulationRef.current?.reheat();
-  };
+  const recomputeLayout = useCallback(() => {
+    console.log("[GraphViewer] Recomputing layout...");
+    // Force a full recompute by reloading data and ignoring cache
+    loadData(true);
+  }, [loadData]);
 
   // Get selected node connections
   const selectedNodeConnections = useMemo(() => {
@@ -1139,7 +1344,12 @@ export function KnowledgeGraphViewer({ className }: { className?: string }) {
     active?: boolean;
   }) => (
     <button
-      onClick={onClick}
+      onClick={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        onClick();
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
       className={cn(
         "p-2 rounded-lg transition-all duration-200",
         "hover:bg-white/80 dark:hover:bg-neutral-700/80",

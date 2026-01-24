@@ -955,7 +955,7 @@ function ConversationItem({
 // =============================================================================
 
 const MIN_SIDEBAR_WIDTH = 256; // 16rem = w-64
-const MAX_SIDEBAR_WIDTH = 800; // Max width when dragging
+const MAX_SIDEBAR_WIDTH_PERCENT = 0.75; // 75% of screen width
 
 export const ChatSidebar = forwardRef<ChatSidebarRef, ChatSidebarProps>(function ChatSidebar({
   conversations,
@@ -1014,7 +1014,8 @@ export const ChatSidebar = forwardRef<ChatSidebarRef, ChatSidebarProps>(function
       if (!isResizing) return;
       
       const newWidth = e.clientX;
-      if (newWidth >= MIN_SIDEBAR_WIDTH && newWidth <= MAX_SIDEBAR_WIDTH) {
+      const maxWidth = window.innerWidth * MAX_SIDEBAR_WIDTH_PERCENT;
+      if (newWidth >= MIN_SIDEBAR_WIDTH && newWidth <= maxWidth) {
         setSidebarWidth(newWidth);
       }
     };
