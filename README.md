@@ -1,76 +1,27 @@
-# ChatNoire
+# ChatNoir
 
-A modern, feature-rich AI chat application built with **Next.js 16**, **Vercel AI SDK v6**, and **Anthropic Claude Sonnet 4.5**.
+A modern, feature-rich AI chat application built with **Next.js 16**, **Vercel AI SDK v6**, and **Anthropic Claude**.
 
-ChatNoire provides a polished chat experience with a persistent knowledge filesystem, large document RAG, parallel context-saving agents, web search, file attachments, authentication, and more.
+ChatNoir provides a polished chat experience with a persistent knowledge filesystem, large document RAG, parallel context-saving agents, web search, a full-featured document viewer, file attachments, authentication, and more.
 
 ---
 
-## Features
+# Part I — Overview
 
-### Core Chat
-- **Streaming Responses** — Real-time response streaming with stop functionality
-- **Conversation History** — Automatically saves chats to IndexedDB with full CRUD support
-- **Chat History Search** — Hybrid search (lexical + semantic + reranking) across past conversations
-- **Parallel Chat Sessions** — Start new chats while responses are still streaming
-- **Auto Title Generation** — AI-generated titles based on conversation content
-- **Message Editing** — Edit previous messages and regenerate responses from that point
+## What Is ChatNoir?
 
-### Knowledge Filesystem
-- **Persistent Storage** — Client-side IndexedDB storage that Claude can read/write via tools
-- **Hybrid Search (RAG)** — Combines lexical + semantic search with RRF (Reciprocal Rank Fusion)
-- **Knowledge Graph** — Create semantic relationships between files (extends, references, requires, contradicts, etc.)
-- **Graph Traversal** — Navigate prerequisite chains, find related content, and detect contradictions
-- **Sidebar Browser** — Visual file browser in the sidebar to explore your knowledge base
-- **KB Summary Preload** — Hybrid context strategy with summary at prompt start for fast retrieval
-- **Quote-Grounding** — Claude extracts quotes from files before synthesizing responses
+ChatNoir is a local-first AI chat app that goes far beyond a simple Claude wrapper. It gives Claude a **persistent memory** (a knowledge filesystem stored in your browser), the ability to **search and discuss uploaded documents** (PDFs, text, markdown), **web search**, and a **full-featured document viewer** with screenshot-based chat. Everything runs client-side except the AI inference itself.
 
-### Large Document RAG
-- **Upload Large Documents** — Upload PDFs, text files, and markdown for Q&A without loading into context
-- **PDF Support** — Hybrid PDF extraction using PDF.js (free) with Claude Haiku fallback for scanned documents
-- **Intelligent Quality Detection** — Automatically detects low-quality PDF.js extraction and falls back to AI OCR
-- **Automatic Chunking** — Heading-aware chunking with 15% overlap to preserve context at boundaries
-- **Hybrid Search** — Combines lexical (exact terms) + semantic (meaning) with RRF fusion
-- **Cross-Encoder Reranking** — Optional reranking stage improves retrieval accuracy by 20-40%
-- **Document Browser** — Visual browser to manage uploaded documents
-- **Background Indexing** — Documents are indexed in the background; you can continue using the app while indexing completes
+### Key Capabilities
 
-### Document Viewer
-- **Full-Screen Viewer** — Cursor-style 3-panel layout with header bar showing document title and status
-- **Native PDF Rendering** — View PDFs with page navigation and zoom controls using react-pdf
-- **Screenshot Selection** — Drag to select any region, press Enter to capture and chat about it
-- **Multiple Chat Tabs** — Open multiple chats side-by-side about different selections
-- **Document Sidebar** — Switch between documents without leaving the viewer
-- **Collapsible Panels** — Resize or collapse sidebars with intuitive icons and expand indicators
-- **Chat Badge** — Collapsed chat panel shows badge with active chat count
-- **Optional Viewing** — Document viewer opens only when you click the View button, not automatically on upload
-
-### AI Capabilities
-- **Web Search** — Anthropic's first-party web search tool for real-time information
-- **Parallel Context Savers** — Spawn up to 6 background agents to save different categories simultaneously
-- **Agent Orchestrator UI** — Visual slot-based progress indicator showing agent status
-- **Multi-Model Support** — Choose between Haiku, Sonnet, and Opus tiers
-- **Tool Support** — Extensible architecture for adding custom AI tools
-
-### Authentication & BYOK
-- **Better Auth** — OAuth authentication with GitHub and Google providers
-- **Owner Mode** — Owner emails get free access using server-side API keys
-- **BYOK (Bring Your Own Key)** — Non-owners can provide their own API keys via Settings
-- **Per-User Key Storage** — API keys stored securely in localStorage, scoped per user
-
-### UI/UX
-- **Rich Markdown Rendering** — Headers, bold, italic, lists, tables, code blocks with syntax highlighting
-- **LaTeX/KaTeX Support** — Mathematical equations rendered beautifully
-- **Inline Icons** — Use `:IconName:` syntax for react-icons (Ionicons, FontAwesome, Material, etc.)
-- **Dark/Light/System Theme** — Full theme support with system preference detection
-- **Neumorphic Tool Cards** — Beautiful neumorphic design for tool execution visualizations
-- **Collapsible Sidebar** — Clean UI with persistent sidebar state
-- **Expandable Input** — Expand the text input for composing longer messages
-- **Copy Code Blocks** — One-click copy for code snippets in responses
-
-### File Handling
-- **File Attachments** — Attach text files and PDFs (with automatic text extraction via pdfjs-dist)
-- **Large Document Upload** — Upload documents for RAG-based Q&A
+- **Chat with Claude** — Streaming responses with full markdown, LaTeX, code highlighting, and tool use
+- **Knowledge Filesystem** — Claude can read, write, search, and link files in a persistent client-side storage system, giving it memory across conversations
+- **Large Document RAG** — Upload PDFs and text files for question-answering without loading entire documents into context
+- **Document Viewer** — A Cursor-style 3-panel reader with PDF rendering, screenshot selection, and margin chats
+- **Web Search** — Anthropic's first-party web search for real-time information
+- **Parallel Context Savers** — Claude spawns up to 6 background agents to organize and save information simultaneously
+- **Chat History Search** — Hybrid search across past conversations
+- **Authentication & BYOK** — OAuth login, owner mode, and bring-your-own-key support
 
 ---
 
@@ -84,74 +35,38 @@ pnpm install
 npm install
 ```
 
-### Step 2: Get Your Anthropic API Key
+### Step 2: Get Your API Keys
 
-1. Go to [console.anthropic.com](https://console.anthropic.com/)
-2. Sign in or create a free account
-3. Navigate to **Settings** → **API Keys** (or go directly to [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys))
-4. Click **"Create Key"**
-5. Copy the key — it will look like `sk-ant-api03-...`
-
-> **Important:** You will only see the full key once. Save it somewhere safe!
+1. **Anthropic API Key** (required) — [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
+2. **OpenAI API Key** (required for embeddings/search) — [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+3. **Cohere API Key** (optional, improves RAG accuracy 20-40%) — [dashboard.cohere.com/api-keys](https://dashboard.cohere.com/api-keys)
 
 ### Step 3: Create Your Environment File
-
-Copy the example file and fill in your values:
 
 ```bash
 cp .env.local.example .env.local
 ```
 
-**Required API Keys:**
+Fill in the required values:
 
 ```bash
-# Anthropic API Key - for Claude chat
-# Get yours at: https://console.anthropic.com/settings/keys
+# Required
 ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-
-# OpenAI API Key - for embeddings/semantic search
-# Get yours at: https://platform.openai.com/api-keys
 OPENAI_API_KEY=sk-proj-your-key-here
-```
 
-**Authentication (Required for multi-user):**
-
-```bash
-# Secret key for signing sessions (generate with: openssl rand -base64 32)
-BETTER_AUTH_SECRET=your-random-32-character-secret-here
-
-# Base URL for auth callbacks
+# Authentication (required for multi-user)
+BETTER_AUTH_SECRET=your-random-32-character-secret-here  # generate: openssl rand -base64 32
 BETTER_AUTH_URL=http://localhost:3000
-
-# GitHub OAuth (create at: https://github.com/settings/developers)
 GITHUB_CLIENT_ID=your-github-client-id
 GITHUB_CLIENT_SECRET=your-github-client-secret
-
-# Google OAuth (create at: https://console.cloud.google.com/apis/credentials)
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
-
-# Owner emails - these users get free access to server API keys
 OWNER_EMAILS=your@email.com
-```
 
-**Optional - Enhanced Reranking:**
-
-```bash
-# Cohere API Key - for cross-encoder reranking (improves RAG accuracy by 20-40%)
-# Get yours at: https://dashboard.cohere.com/api-keys
-# If not set, falls back to GPT-4o-mini reranking using your OpenAI key
-COHERE_API_KEY=your-cohere-api-key-here
-```
-
-**Optional - Model Configuration:**
-
-```bash
-# Main chat model (default: claude-sonnet-4-5)
-MAIN_MODEL=claude-sonnet-4-5
-
-# Context Saver agent model (default: claude-sonnet-4-5)
-CONTEXT_SAVER_MODEL=claude-sonnet-4-5
+# Optional
+COHERE_API_KEY=your-cohere-api-key-here          # cross-encoder reranking
+MAIN_MODEL=claude-sonnet-4-5                      # default chat model
+CONTEXT_SAVER_MODEL=claude-sonnet-4-5             # context saver model
 ```
 
 ### Step 4: Start the Development Server
@@ -163,6 +78,474 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+---
+
+## How to Use It
+
+1. **Chat** — Type a message and chat with Claude. Responses stream in real-time. You can switch models between Haiku (fast), Sonnet (balanced), and Opus (powerful).
+
+2. **Knowledge Base** — Share information and Claude will save it automatically using parallel context savers. Browse your knowledge in the sidebar. Claude searches it before every response.
+
+3. **Upload Documents** — Click "Upload Document" in the Large Documents section. Documents index in the background. Once indexed, Claude can search them to answer questions.
+
+4. **View Documents** — Click the eye icon on any document to open the full-screen viewer. Drag to select regions of a PDF, press Enter, and chat about the selection.
+
+5. **Web Search** — Claude automatically searches the web when questions require real-time information.
+
+6. **Search Chat History** — Claude can search your past conversations to find relevant context.
+
+---
+
+## Authentication & Access
+
+| User Type | API Keys Used | How to Set Up |
+|-----------|---------------|---------------|
+| **Owner** | Server-side env keys | Add email to `OWNER_EMAILS` |
+| **BYOK User** | Their own keys | Enter via Settings modal |
+| **Free Trial** | Owner's keys (5 chats) | Automatic for new visitors |
+
+**OAuth Setup:**
+- **GitHub**: Create OAuth app at [github.com/settings/developers](https://github.com/settings/developers) — Callback: `http://localhost:3000/api/auth/callback/github`
+- **Google**: Create credentials at [console.cloud.google.com](https://console.cloud.google.com/apis/credentials) — Callback: `http://localhost:3000/api/auth/callback/google`
+
+---
+
+## NPM Scripts
+
+| Script | Command | Description |
+|--------|---------|-------------|
+| `dev` | `next dev --turbopack` | Start dev server with Turbopack |
+| `dev:webpack` | `next dev --webpack` | Start dev server with Webpack |
+| `dev:clean` | `rm -rf .next && next dev --turbopack` | Clean cache and start fresh |
+| `build` | `next build` | Build for production |
+| `start` | `next start` | Start production server |
+| `lint` | `eslint .` | Run ESLint |
+
+---
+
+## Deploying to Vercel
+
+1. Push your code to GitHub
+2. Import the repository in [Vercel](https://vercel.com)
+3. Add environment variables in Project Settings:
+   - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
+   - `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (production URL)
+   - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`
+   - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+   - `OWNER_EMAILS`
+   - `COHERE_API_KEY` (optional)
+4. Update OAuth callback URLs to use your production domain
+5. Deploy!
+
+---
+
+## Troubleshooting
+
+### "ANTHROPIC_API_KEY is not set" Error
+1. Ensure the file is named exactly `.env.local` (with the leading dot)
+2. Verify it's in the project root (same level as `package.json`)
+3. Check there are no spaces around the `=` sign
+4. Restart the dev server after creating the file
+
+### "invalid x-api-key" Error
+1. Verify you copied the full key (it's quite long)
+2. Ensure the key starts with `sk-ant-api03-`
+3. Check for extra spaces or quotes around the key
+
+### PDF Upload Requires API Key
+Scanned/image-based PDFs require AI-powered OCR via Claude Haiku. Ensure `ANTHROPIC_API_KEY` is configured.
+
+### Document Has Very Few Chunks
+If a PDF has surprisingly few chunks, PDF.js may have extracted low-quality text. Delete and re-upload — the improved quality detection should trigger AI OCR fallback.
+
+---
+
+# Part II — Technical Deep-Dive
+
+## Architecture at a Glance
+
+ChatNoir is a Next.js 16 App Router application with a **local-first architecture**. All persistent storage (knowledge base, chat history, document chunks, embeddings) lives in the browser via IndexedDB. The server handles AI inference, embeddings, and reranking. This design means zero database setup, instant reads, and full offline access to stored data.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Browser (Client)                                           │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ Knowledge    │  │ Chat History │  │ Large Documents  │  │
+│  │ Filesystem   │  │ (IndexedDB)  │  │ (IndexedDB v4)   │  │
+│  │ (IndexedDB)  │  │              │  │ docs, chunks,    │  │
+│  │              │  │              │  │ files, embeddings│  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────────┘  │
+│         │                 │                  │              │
+│  ┌──────┴─────────────────┴──────────────────┴───────────┐  │
+│  │           useClientTools (shared hook)                 │  │
+│  │  Fire-and-forget execution · XML-formatted outputs    │  │
+│  └───────────────────────────┬───────────────────────────┘  │
+│                              │                              │
+├──────────────────────────────┼──────────────────────────────┤
+│  Server (Next.js API Routes) │                              │
+│  ┌───────────────────────────┴───────────────────────────┐  │
+│  │  /api/chat        → ToolLoopAgent (AI SDK v6)         │  │
+│  │  /api/embed       → OpenAI text-embedding-3-small     │  │
+│  │  /api/rerank      → Cohere or GPT-4o-mini fallback    │  │
+│  │  /api/context-saver → Parallel background agents      │  │
+│  │  /api/parse-pdf   → Claude Haiku OCR fallback         │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## The Agent System
+
+### ToolLoopAgent Pattern
+
+The chat agent (`agents/chat-agent.ts`) uses AI SDK v6's `ToolLoopAgent` — the model can call tools and receive results in a loop, up to 10 steps, enabling multi-hop reasoning without manual orchestration:
+
+```typescript
+stopWhen: stepCountIs(10)  // Prevents infinite tool loops
+```
+
+Tools are registered via a factory (`createTools`) that accepts API keys, making the tool set configurable per-request. Client-side tools (KB operations, document search, chat search) execute in the browser via the shared `useClientTools` hook, while server-side tools (web search, context savers) execute on the server.
+
+### Context Engineering
+
+The system prompt follows research-backed context engineering principles:
+
+1. **XML-structured data at the top** — KB summary, document list, and metadata are wrapped in semantic XML tags (`<knowledge_base>`, `<uploaded_documents>`, `<assistant_identity>`). Studies show XML-structured context at the beginning of prompts improves retrieval by up to 30%.
+
+2. **Hybrid preload strategy** — A compact KB summary is injected into the system prompt for fast access; Claude uses `kb_search` and `kb_read` for on-demand deep retrieval. This balances latency (no tool call needed for overview) with depth (full content available).
+
+3. **Quote-grounding** — The prompt instructs Claude to extract verbatim `<quote>` tags from knowledge files before synthesizing responses. This technique improves factual accuracy by 20+ percentage points by forcing the model to anchor claims to source material.
+
+4. **Multi-source investigation** — The agent is prompted to proactively check multiple sources (KB search, chat history search, web search) before answering, reducing hallucination through triangulation.
+
+### Parallel Context Savers
+
+When Claude decides to save information, it spawns up to 6 independent background agents via the `save_to_context` tool. Each agent handles one category (personal info, preferences, work details, etc.) in parallel:
+
+- The orchestrator UI shows a slot-based progress indicator that fills as agents complete
+- Each agent runs as an independent API call to `/api/context-saver`
+- The main chat continues streaming while agents work in the background
+- Agents use the same KB tools (write, append, link) to organize saved information
+
+---
+
+## Hybrid Search System (RAG)
+
+All three search domains — Knowledge Base, Chat History, and Large Documents — share an identical hybrid search pipeline. This unified architecture ensures consistent retrieval quality regardless of which tool Claude uses.
+
+### The Pipeline
+
+```
+Query → [Query Type Detection] → [Lexical Search] + [Semantic Search]
+                                        ↓                   ↓
+                                  BM25 rankings        Embedding rankings
+                                        ↓                   ↓
+                                   [Reciprocal Rank Fusion (RRF)]
+                                              ↓
+                                     [Cross-Encoder Reranking]
+                                              ↓
+                                        Top-K results
+```
+
+### Reciprocal Rank Fusion (RRF)
+
+Instead of combining raw scores (which requires fragile normalization across different scoring systems), RRF uses **ranks**:
+
+```
+RRF(d) = 1/(k + semantic_rank) + 1/(k + lexical_rank)
+```
+
+With k=60 (the industry standard), this formula:
+- Rewards documents appearing in both lexical AND semantic results
+- Is robust across different scoring scales (no normalization needed)
+- Prevents a single top-ranked result from dominating the final list
+
+**Why hybrid?** Dense embeddings alone miss exact term matches (error codes, API names, proper nouns), while keyword search alone misses conceptual relationships. Hybrid search captures both.
+
+### Query Type Detection
+
+The system automatically classifies queries as:
+- **Exact** — Quoted phrases, code snippets, error codes → lexical-heavy
+- **Semantic** — Natural language questions → embedding-heavy
+- **Mixed** — Both → balanced fusion
+
+While RRF is rank-based and doesn't strictly need weighting, query type detection helps with debugging and metrics.
+
+### Cross-Encoder Reranking
+
+After initial retrieval (top 50 candidates), a cross-encoder reranks results by examining query-document pairs jointly. Unlike bi-encoders (which embed query and document separately), cross-encoders capture fine-grained word-level interactions:
+
+| Backend | Quality | Cost | Notes |
+|---------|---------|------|-------|
+| **Cohere** | Best | $2/1000 searches | Purpose-built reranker, fastest |
+| **GPT-4o-mini** | Good | ~$0.15/1M tokens | Default if no Cohere key |
+| **None** | Baseline | Free | Skip reranking entirely |
+
+This retrieve-then-rerank pattern (50 → topK) improves accuracy by 20-40% over retrieval alone.
+
+### Unified Search Table
+
+| Feature | KB Search | Chat Search | Document Search |
+|---------|-----------|-------------|-----------------|
+| Semantic search (embeddings) | ✓ | ✓ | ✓ |
+| Lexical/term matching (BM25) | ✓ | ✓ | ✓ |
+| Hybrid fusion (RRF) | ✓ | ✓ | ✓ |
+| Cross-encoder reranking | ✓ | ✓ | ✓ |
+| Retrieve-then-rerank (50→topK) | ✓ | ✓ | ✓ |
+| Chunk overlap (~15%) | ✓ | ✓ | ✓ |
+| Matched terms in results | ✓ | ✓ | ✓ |
+
+---
+
+## Knowledge Filesystem
+
+The knowledge filesystem is a virtual file system stored entirely in IndexedDB. Claude interacts with it through tools that mirror a real filesystem:
+
+| Tool | Description |
+|------|-------------|
+| `kb_list(path)` | List folder contents |
+| `kb_read(path)` | Read a file's contents |
+| `kb_write(path, content)` | Create or overwrite a file |
+| `kb_append(path, content)` | Append to a file |
+| `kb_mkdir(path)` | Create a folder |
+| `kb_delete(path)` | Delete a file or folder |
+| `kb_search(query, topK?)` | Hybrid search across all files |
+| `kb_link(source, target, relationship)` | Create a relationship between files |
+| `kb_unlink(source, target, relationship)` | Remove a relationship |
+| `kb_links(path)` | Query all links for a file |
+| `kb_graph(startPath, depth?, relationship?, direction?)` | Traverse the knowledge graph |
+
+### Knowledge Graph
+
+Beyond flat file storage, the knowledge graph adds **semantic relationships** between files, transforming isolated documents into an interconnected web:
+
+| Relationship | Meaning | Example |
+|-------------|---------|---------|
+| `extends` | Builds upon | "calculus.md" extends "algebra.md" |
+| `references` | Cites | "project-plan.md" references "requirements.md" |
+| `contradicts` | Conflicts with | "diet-2025.md" contradicts "diet-2024.md" |
+| `requires` | Prerequisite | "ml-advanced.md" requires "linear-algebra.md" |
+| `blocks` | Blocks progress | "tech-debt.md" blocks "feature-x.md" |
+| `relates-to` | Thematic connection | "react-hooks.md" relates-to "state-management.md" |
+
+Graph traversal via `kb_graph` enables:
+- **Prerequisite chains**: Find what you need to learn first
+- **Impact analysis**: Discover what depends on a given file
+- **Contradiction detection**: Surface conflicting information
+- **Related content discovery**: Navigate thematic connections
+
+---
+
+## Large Document RAG
+
+### The Ingestion Pipeline
+
+```
+Upload → Store File (IndexedDB) → Background Indexing:
+  1. Extract text (PDF.js or Claude Haiku OCR)
+  2. Heading-aware chunking (512 tokens, 15% overlap)
+  3. SHA-256 hash each chunk
+  4. Compare hashes against existing chunks
+  5. Embed only new/changed chunks (OpenAI)
+  6. Store chunks + embeddings in IndexedDB
+  7. Clean up stale chunks from previous runs
+```
+
+### Intelligent PDF Extraction
+
+ChatNoir uses a two-tier PDF extraction strategy:
+
+| Method | Cost | Speed | Best For |
+|--------|------|-------|----------|
+| **PDF.js** | Free | Fast | Text-based PDFs with selectable text |
+| **Claude Haiku** | ~$0.01/page | Slower | Scanned documents, image-heavy PDFs |
+
+**Quality detection** automatically triggers the fallback by checking:
+- **Character density** — Real documents have 500+ chars/page
+- **Word density** — Real text has 5+ words per 100 characters
+- **Text structure** — Proper spacing ratios indicate readable content
+
+When these heuristics detect garbage extraction (common with scanned PDFs), the system seamlessly falls back to Claude Haiku for AI-powered OCR.
+
+### Content Hash Change Detection
+
+Re-indexing a document doesn't re-embed everything. Each chunk is SHA-256 hashed, and hashes are compared against existing chunks:
+
+```typescript
+const existingHashMap = new Map<string, LargeDocumentChunk>();
+for (const chunk of existingChunks) {
+  existingHashMap.set(chunk.contentHash, chunk);
+}
+// Only embed chunks whose hash changed — saves API calls
+```
+
+This means editing a few paragraphs in a 200-page document only re-embeds the affected chunks.
+
+### Per-Document Search
+
+Cross-document search loads chunks per-document via IndexedDB index queries (`by-document`), processes each document's chunks independently, then merges results globally. This bounds memory usage — a collection of 50 large documents doesn't load all chunks into memory at once.
+
+### Chunking Strategy
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Chunk Size | 512 tokens | Optimal for fact-focused Q&A (per NVIDIA benchmarks) |
+| Overlap | 75 tokens (15%) | Prevents context loss at chunk boundaries |
+| Splitter | Heading-aware | Respects document structure (headings, paragraphs, sentences) |
+
+---
+
+## Document Viewer
+
+### Cursor-Style 3-Panel Layout
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Document.pdf                                 [Indexing...]           [✕]   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [Document Sidebar]       │  [PDF/Text Viewer]          │  [Chat Panel]      │
+│ (collapsible, resizable) │  (main content area)        │  (collapsible)     │
+│                          │                             │                    │
+│ > Documents              │  ┌─────────────────────┐    │  [Chat 1] [Chat 2] │
+│   • Calculus.pdf         │  │                     │    │  ─────────────────  │
+│   ○ Physics.pdf          │  │   PDF Page Render   │    │  Selection: [img]  │
+│   ○ Notes.md             │  │                     │    │                    │
+│                          │  │   [Drag to select]  │    │  User: Explain...  │
+│                          │  │   [┌───────────┐]   │    │  Claude: This...   │
+│                          │  │   [│ selection │]   │    │                    │
+│                          │  │   [└───────────┘]   │    │  ┌──────────────┐  │
+│                          │  └─────────────────────┘    │  │ [input...]   │  │
+│                          │  [◀ Page [_1_]/50 ▶][Zoom][☾]│             [💬 2] │
+│ [📄▸]                    │  [Capture (Enter)] [Cancel] │                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Built with `react-resizable-panels`, the layout provides imperative panel handles for programmatic expand/collapse with intuitive icons and chat count badges on collapsed panels.
+
+### Progressive Page Loading (Sliding Window)
+
+Rendering all pages of a 1000-page PDF would be catastrophic for memory. Instead, the PDF viewer uses a **sliding window** approach:
+
+```typescript
+const PAGE_BUFFER = 3;
+// Only 7 pages rendered at any time: visible page ± 3 buffer pages
+function getWindowPages(centerPage: number, numPages: number): Set<number>
+```
+
+An **IntersectionObserver** detects which page is most visible, with 150ms debouncing to prevent re-render storms during fast scrolling. A ref-based tracking pattern avoids recreating the observer on every state change:
+
+```typescript
+visiblePageRef.current = mostVisiblePage;
+setTimeout(() => setVisiblePage(visiblePageRef.current), SCROLL_DEBOUNCE_MS);
+```
+
+As the user scrolls, the window slides — distant pages are evicted and new pages are rendered, keeping memory bounded regardless of document length.
+
+### Zoom Position Preservation
+
+When zooming, the viewer records the fractional scroll position within the current page, then restores the exact relative position after React re-renders at the new scale. The IntersectionObserver is suppressed during the zoom transition to prevent page-jump artifacts.
+
+### Internal Link Navigation
+
+Clicking table-of-contents links, footnotes, or cross-references navigates to the target page — even if that page hasn't been rendered yet. The viewer expands the sliding window to include the target, scrolls to it, and then re-centers the window.
+
+### Screenshot Selection (Native Canvas Capture)
+
+The screenshot system extracts directly from react-pdf's native canvas, avoiding the overhead and CSS-parsing issues of libraries like html2canvas:
+
+```typescript
+const pdfCanvas = pageElement.querySelector("canvas");
+ctx.drawImage(pdfCanvas, left * scaleX, top * scaleY, width, height);
+```
+
+Smart scaling handles edge cases:
+- Small selections are upscaled (1.5x) for readability
+- Large selections are capped at 1500px to avoid excessive token usage
+- Format selection: JPEG for large images (>500K pixels), PNG for smaller ones
+
+### Session-Level PDF Cache
+
+A module-level `Map` caches PDF files as `Uint8Array` (preventing ArrayBuffer detachment issues). Up to 10 documents are cached with LRU-style eviction, making re-opening recently viewed documents instant.
+
+### Upload Reconciliation
+
+When a document is uploaded and viewed before indexing completes, the viewer creates a temporary `pending-` ID and displays the raw file immediately. A polling mechanism checks every 2 seconds for the real indexed document:
+
+```typescript
+if (currentDocument.id.startsWith("pending-")) {
+  const match = docs.find(d => d.filename === currentDocument.filename);
+  if (match) setCurrentDocument(match);  // Seamless transition
+}
+```
+
+The user sees no interruption — the view seamlessly transitions from direct file to indexed document.
+
+### Margin Chat (Full Infrastructure Reuse)
+
+Each margin chat tab is a **full-featured chat instance** that reuses the same infrastructure as the main chat:
+
+- Same `/api/chat` endpoint and `useChat` hook
+- Shared `ChatMessage` component for markdown, LaTeX, code, and tool rendering
+- Shared `ToolInvocationRenderer` for tool call displays
+- Same `useClientTools` hook for KB search, document search
+- Independent conversation history per tab
+
+This guarantees feature parity — syntax-highlighted code blocks, KaTeX math, GFM tables, and tool visualizations all work identically in margin chats.
+
+### Text Viewer Fidelity
+
+Text and markdown documents render from the **original uploaded file** stored in IndexedDB, not from reconstructed chunks. This preserves exact formatting, whitespace, and structure. Legacy documents without stored files fall back to chunk reconstruction.
+
+---
+
+## Client-Side Tool Execution
+
+The `useClientTools` hook is the bridge between the AI SDK's streaming protocol and IndexedDB operations:
+
+### Fire-and-Forget Pattern
+
+Tool calls execute asynchronously without blocking the stream, enabling parallel execution:
+
+```typescript
+const handleToolCall = useCallback(({ toolCall }) => {
+  executeToolAsync(toolName, toolCallId, args);  // Don't await
+}, [executeToolAsync]);
+```
+
+This means Claude can fire multiple `kb_search` or `document_search` calls simultaneously, with results arriving as they complete.
+
+### XML-Formatted Outputs
+
+All tool outputs include XML-formatted versions alongside structured data. For example, `kb_search` returns both a JSON result and a `<search_results>` XML block. This context engineering technique improves the model's ability to parse and use tool results accurately.
+
+### Configurable Tool Enablement
+
+Different chat contexts enable different tool sets:
+- **Main chat**: All tools (KB, documents, chat search, web search, context savers)
+- **Document viewer margin chat**: Only KB and document tools (no chat search or context savers)
+
+---
+
+## Streaming & UI
+
+### Smooth Streaming
+
+The chat API uses AI SDK's `smoothStream` with line-based chunking to prevent mid-word cuts during streaming, improving perceived performance and readability.
+
+### Neumorphic Tool Cards
+
+Tool execution results are rendered as neumorphic cards — soft shadows and subtle gradients create a tactile, physical feel. Each tool type has a specialized view component (KB results, web search, document search, etc.) with a generic fallback for unknown tools.
+
+### Rich Rendering Pipeline
+
+Messages pass through a rendering pipeline:
+1. **react-markdown** with remark-gfm for GitHub-flavored markdown
+2. **remark-math** + **rehype-katex** for LaTeX equation rendering
+3. **react-syntax-highlighter** with Prism for code block syntax highlighting
+4. Custom `:IconName:` syntax for inline react-icons
+5. One-click copy for code blocks
 
 ---
 
@@ -197,47 +580,42 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 │   │   └── types.ts              # Link/graph types
 │   └── large-documents/          # Large document RAG system
 │       ├── index.ts              # Large docs public API
-│       ├── idb.ts                # IndexedDB schema for documents + file storage
-│       ├── operations.ts         # Upload, index, hybrid search, PDF extraction with quality detection
+│       ├── idb.ts                # IndexedDB schema v4 (documents, chunks, files, umap_projections)
+│       ├── operations.ts         # Upload, index, hybrid search, PDF extraction, content hash detection
 │       ├── lexical-search.ts     # BM25-style term matching for documents
 │       └── types.ts              # Large document types
 │
 ├── tools/                         # Tool definitions
 │   ├── index.ts                  # Export all tools (createTools factory)
-│   ├── knowledge-tools.ts        # Knowledge filesystem + graph tools (kb_list, kb_read, kb_link, kb_graph, etc.)
+│   ├── knowledge-tools.ts        # KB filesystem + graph tools
 │   ├── document-search.ts        # Large document search tools
 │   ├── save-to-context.ts        # Parallel context-saving tool
 │   ├── web-search.ts             # Anthropic web search integration
-│   └── example-weather.ts.example  # Example tool template
+│   └── example-weather.ts.example # Example tool template
 │
 ├── components/
 │   ├── ai-chat.tsx               # Main chat UI component
 │   ├── chat-sidebar.tsx          # Sidebar with conversation history & KB browser
 │   ├── knowledge-browser.tsx     # Knowledge filesystem browser UI
 │   ├── knowledge-graph-viewer.tsx # Interactive knowledge graph visualization
-│   ├── large-document-browser.tsx # Large document upload/manage UI (background indexing)
-│   ├── chat/                     # Shared chat components (reused by main chat & document viewer)
-│   │   ├── index.ts              # Public exports
-│   │   ├── markdown-content.tsx  # Markdown/LaTeX/code rendering with syntax highlighting
+│   ├── large-document-browser.tsx # Large document upload/manage UI
+│   ├── chat/                     # Shared chat components
+│   │   ├── markdown-content.tsx  # Markdown/LaTeX/code rendering
 │   │   ├── tool-invocation.tsx   # Tool call UI rendering
-│   │   └── chat-message.tsx      # Complete message rendering (text, tools, files)
+│   │   └── chat-message.tsx      # Complete message rendering
 │   ├── document-viewer/          # Full-screen document viewer
-│   │   ├── index.tsx             # Main 3-panel layout with header bar and react-resizable-panels
-│   │   ├── pdf-viewer.tsx        # PDF rendering with native canvas screenshot capture
-│   │   ├── text-viewer.tsx       # Markdown/text rendering with text selection
+│   │   ├── index.tsx             # 3-panel layout with react-resizable-panels
+│   │   ├── pdf-viewer.tsx        # PDF rendering with progressive loading
+│   │   ├── text-viewer.tsx       # Markdown/text rendering
 │   │   ├── chat-panel.tsx        # Tabbed chat container
-│   │   ├── chat-instance.tsx     # Individual margin chat (Sonnet model, supports text & image)
-│   │   └── document-sidebar.tsx  # Document list sidebar with collapsible expand indicator
-│   ├── embeddings-viewer.tsx     # KB embeddings debug viewer
-│   ├── document-embeddings-viewer.tsx # Document embeddings debug viewer
-│   ├── chat-embeddings-viewer.tsx # Chat embeddings debug viewer
-│   ├── theme-provider.tsx        # Theme context provider
+│   │   ├── chat-instance.tsx     # Individual margin chat
+│   │   └── document-sidebar.tsx  # Document list sidebar
 │   ├── tools/                    # Tool-specific UI components
 │   │   ├── agent-orchestrator-view.tsx  # Visual agent progress slots
 │   │   ├── context-saver-view.tsx       # Context saver streaming display
 │   │   ├── knowledge-tool-view.tsx      # KB tool result cards
-│   │   ├── knowledge-link-tool-view.tsx # Knowledge graph link result cards
-│   │   ├── document-search-view.tsx     # Large doc search results
+│   │   ├── knowledge-link-tool-view.tsx # Knowledge graph link cards
+│   │   ├── document-search-view.tsx     # Document search results
 │   │   ├── chat-search-view.tsx         # Chat history search results
 │   │   ├── web-search-view.tsx          # Web search result display
 │   │   ├── chunk-viewer-modal.tsx       # Chunk detail modal
@@ -249,7 +627,9 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 │   ├── auth-client.ts            # Better Auth client
 │   ├── auth-helper.ts            # Auth utilities for API routes
 │   ├── api-keys.ts               # BYOK API key management
+│   ├── free-trial.ts             # Free trial tracking (5 free chats)
 │   ├── use-chat-history.ts       # Chat history hook
+│   ├── use-client-tools.ts       # Shared hook for client-side tool execution
 │   ├── chat-types.ts             # Chat-related types
 │   ├── storage/                  # Storage utilities
 │   │   ├── chat-store.ts         # Chat storage operations
@@ -257,25 +637,27 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 │   │   ├── chat-embeddings-idb.ts # Chat embeddings IndexedDB
 │   │   ├── chat-embeddings-ops.ts # Chat embeddings operations
 │   │   ├── chat-lexical-search.ts # BM25-style term matching for chat
-│   │   └── chat-hybrid-search.ts  # Hybrid search for chat (lexical + semantic + RRF)
+│   │   └── chat-hybrid-search.ts  # Hybrid search for chat
 │   └── utils.ts                  # Utility functions
 │
 ├── app/
 │   ├── api/
-│   │   ├── auth/[...all]/route.ts  # Better Auth catch-all route
-│   │   ├── chat/route.ts           # Main chat API endpoint
-│   │   ├── embed/route.ts          # Embedding API endpoint
-│   │   ├── context-saver/route.ts  # Context saver agent endpoint
-│   │   ├── generate-title/route.ts # Auto title generation endpoint
-│   │   └── parse-pdf/route.ts      # Claude Haiku PDF extraction fallback (uses free trial)
+│   │   ├── auth/[...all]/route.ts    # Better Auth catch-all route
+│   │   ├── auth/check-owner/route.ts # Owner status check endpoint
+│   │   ├── chat/route.ts             # Main chat API endpoint
+│   │   ├── embed/route.ts            # Embedding API endpoint
+│   │   ├── rerank/route.ts           # Reranking API endpoint
+│   │   ├── context-saver/route.ts    # Context saver agent endpoint
+│   │   ├── generate-title/route.ts   # Auto title generation endpoint
+│   │   └── parse-pdf/route.ts        # Claude Haiku PDF extraction fallback
 │   ├── page.tsx                  # Main page
 │   ├── layout.tsx                # Root layout
 │   └── globals.css               # Global styles
 │
 ├── docs/                          # Technical documentation
-│   ├── RAG_SEMANTIC_SEARCH.md        # Hybrid search implementation details
-│   ├── UNIFIED_SEARCH_PLAN.md        # Unified hybrid search across all tools
-│   ├── CROSS_CHAT_CONTEXT_SYSTEM.md  # Cross-chat context system docs
+│   ├── RAG_SEMANTIC_SEARCH.md
+│   ├── UNIFIED_SEARCH_PLAN.md
+│   ├── CROSS_CHAT_CONTEXT_SYSTEM.md
 │   └── KNOWLEDGE_FILESYSTEM_REFACTOR.md
 │
 └── .env.local                    # Your environment variables (create this!)
@@ -283,343 +665,12 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-## Knowledge Filesystem
-
-ChatNoire includes a **Knowledge Filesystem** — a persistent client-side storage system that Claude can read and write via tools. This allows the AI to remember information about you across conversations.
-
-### How It Works
-
-The Knowledge Filesystem is stored in **IndexedDB** in your browser, providing fast, local access without any API calls. Claude has access to tools for managing your knowledge base:
-
-| Tool | Description |
-|------|-------------|
-| `kb_list(path)` | List folder contents |
-| `kb_read(path)` | Read a file's contents |
-| `kb_write(path, content)` | Create or overwrite a file |
-| `kb_append(path, content)` | Append to a file |
-| `kb_mkdir(path)` | Create a folder |
-| `kb_delete(path)` | Delete a file or folder |
-| `kb_search(query, topK?)` | Hybrid search across all files (lexical + semantic) |
-| `kb_link(source, target, relationship)` | Create a relationship between two files |
-| `kb_unlink(source, target, relationship)` | Remove a relationship |
-| `kb_links(path)` | Query all links for a file (incoming and outgoing) |
-| `kb_graph(startPath, depth?, relationship?, direction?)` | Traverse the knowledge graph |
-
-### Parallel Context Saving
-
-When you share information, Claude can spawn **parallel context saver agents** (up to 6) to organize and save different categories simultaneously:
-
-| Tool | Description |
-|------|-------------|
-| `save_to_context(information, context?)` | Spawn a background agent to save one category |
-
-For example, if you say "I'm John, a software engineer at Google, and I prefer dark mode", Claude will spawn 3 parallel agents:
-1. Personal info agent → saves name
-2. Work info agent → saves job details
-3. Preferences agent → saves UI preferences
-
-The UI shows a beautiful slot-based progress indicator that fills as agents complete.
-
-### Hybrid Search (RAG)
-
-ChatNoire uses a **hybrid search** system that combines lexical and semantic approaches for optimal retrieval:
-
-**Why hybrid?** Dense embeddings alone miss exact term matches (like error codes or API names), while keyword search alone misses conceptual relationships. Hybrid search gives you both.
-
-#### Search Pipeline
-
-1. **Lexical Search** — BM25-style term matching with TF-IDF scoring
-2. **Semantic Search** — OpenAI embeddings for meaning-based retrieval
-3. **RRF Fusion** — Reciprocal Rank Fusion combines both result lists
-4. **Reranking** (optional) — Cross-encoder reranks top candidates for 20-40% accuracy boost
-
-#### Reciprocal Rank Fusion (RRF)
-
-RRF is the 2025 industry standard for combining search results. Unlike weighted scores, RRF uses **ranks** not scores, making it robust across different scoring systems:
-
-```
-RRF(d) = 1/(k + semantic_rank) + 1/(k + lexical_rank)
-```
-
-Documents that appear in both lexical AND semantic results get boosted.
-
-#### Cross-Encoder Reranking
-
-After initial retrieval, a cross-encoder model reranks the top candidates by examining query-document pairs together. This captures word-level interactions that bi-encoders miss.
-
-| Backend | Quality | Cost | Notes |
-|---------|---------|------|-------|
-| **Cohere** | Best | $2/1000 searches | Purpose-built, fastest |
-| **GPT-4o-mini** | Good | ~$0.15/1M tokens | Default if no Cohere key |
-| **None** | Baseline | Free | Skip reranking |
-
-> **Note:** Requires `OPENAI_API_KEY` for embeddings. Reranking uses GPT-4o-mini by default, or Cohere if `COHERE_API_KEY` is set.
-
-### Unified Search Across All Tools
-
-All three search tools share the same hybrid search pipeline:
-
-| Feature | KB Search | Chat Search | Document Search |
-|---------|-----------|-------------|-----------------|
-| Semantic search (embeddings) | ✅ | ✅ | ✅ |
-| Lexical/term matching | ✅ | ✅ | ✅ |
-| Hybrid fusion (RRF) | ✅ | ✅ | ✅ |
-| Cross-encoder reranking | ✅ | ✅ | ✅ |
-| Retrieve-then-rerank (50→topK) | ✅ | ✅ | ✅ |
-| Query type detection | ✅ | ✅ | ✅ |
-| Chunk overlap (~15%) | ✅ | ✅ | ✅ |
-| Matched terms in results | ✅ | ✅ | ✅ |
-
-This ensures consistent behavior and accuracy regardless of which search tool Claude uses.
-
-Additionally, the **Knowledge Graph** provides relationship-based retrieval via `kb_links` and `kb_graph`, complementing the search-based approach with structural navigation.
-
-### Hybrid Preload Strategy
-
-ChatNoire uses a hybrid context strategy for optimal performance:
-- **Summary at start**: A compact index of your KB is included in Claude's system prompt
-- **Semantic search**: Claude uses `kb_search` to find relevant content by meaning or exact terms
-- **On-demand retrieval**: Claude uses `kb_read` to fetch full file contents when needed
-- **Quote-grounding**: Claude extracts quotes from files before synthesizing responses for accuracy
-
-### Knowledge Graph
-
-ChatNoire includes a **Knowledge Graph** that transforms your knowledge base from isolated files into an interconnected web of ideas. Claude automatically creates relationships when you share information.
-
-#### Relationship Types
-
-| Type | Meaning | Example |
-|------|---------|---------|
-| `extends` | Target builds on source | "calculus.md" extends "algebra.md" |
-| `references` | Target cites source | "project-plan.md" references "requirements.md" |
-| `contradicts` | Target conflicts with source | "diet-2025.md" contradicts "diet-2024.md" |
-| `requires` | Target is prerequisite for source | "ml-advanced.md" requires "linear-algebra.md" |
-| `blocks` | Source blocks progress on target | "tech-debt.md" blocks "feature-x.md" |
-| `relates-to` | General thematic connection | "react-hooks.md" relates-to "state-management.md" |
-
-#### Graph Traversal
-
-Use `kb_graph` to navigate the knowledge graph:
-- **Find prerequisites**: `kb_graph("ml-notes.md", depth=3, relationship="requires")` 
-- **Discover related content**: `kb_graph("react.md", direction="both")`
-- **Impact analysis**: `kb_graph("api.md", direction="incoming")` — what depends on this?
-- **Detect contradictions**: `kb_graph("diet.md", relationship="contradicts")`
-
-The graph can be visualized in the sidebar under **Visualization → Graph tab**.
-
-### Suggested Organization
-
-```
-knowledge/
-├── about-me/
-│   ├── background.md
-│   └── resume.md
-├── preferences/
-│   └── coding-style.md
-├── projects/
-│   ├── current-project.md
-│   └── ideas.md
-└── work/
-    └── team.md
-```
-
----
-
-## Large Document RAG
-
-For documents too large to fit in Claude's context window, ChatNoire provides a **Large Document RAG** system. Upload PDFs, text files, or markdown and ask questions without loading the entire document.
-
-### How It Works
-
-1. **Upload** — Click "Upload Document" or drag-and-drop a file in the Large Documents browser
-2. **Storage** — File is immediately stored in IndexedDB for viewing
-3. **Background Indexing** — Document is indexed in the background while you continue using the app
-4. **PDF Extraction** — PDFs are parsed using PDF.js (free), with intelligent quality detection that falls back to Claude Haiku for scanned/image-based documents
-5. **Chunking** — Document is split into ~512-token chunks with 15% overlap
-6. **Embedding** — Each chunk is embedded using OpenAI's embedding model
-7. **Storage** — Chunks with embeddings stored in IndexedDB (client-side)
-8. **Search** — Claude uses `document_search` to find relevant chunks by meaning
-9. **Rerank** — Top candidates are reranked for higher accuracy
-10. **Answer** — Claude synthesizes an answer from the retrieved chunks
-
-### Document Tools
-
-| Tool | Description |
-|------|-------------|
-| `document_search(query, topK?, documentId?)` | Semantic search across uploaded documents |
-| `document_list()` | List all uploaded documents |
-
-### PDF Extraction
-
-ChatNoire uses an **intelligent hybrid PDF extraction** strategy:
-
-| Method | Cost | Speed | Best For |
-|--------|------|-------|----------|
-| **PDF.js** | Free | Fast | Text-based PDFs with selectable text |
-| **Claude Haiku** | ~$0.01/page | Slower | Scanned documents, image-heavy PDFs |
-
-The system automatically detects when PDF.js extraction yields low-quality content by checking:
-- **Character density** — At least 500 chars/page expected for real documents
-- **Word density** — Real text has 5+ words per 100 characters
-- **Text structure** — Proper spacing ratios indicate readable content
-
-When quality checks fail, the system automatically falls back to Claude Haiku for AI-powered OCR.
-
-### Chunking Strategy (2025 Best Practices)
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| **Chunk Size** | 512 tokens | Optimal for fact-focused Q&A retrieval |
-| **Overlap** | 75 tokens (15%) | Prevents context loss at boundaries |
-| **Splitter** | Heading-aware | Respects document structure (Markdown headings, paragraphs, sentences) |
-
-### Supported File Types
-
-- **Text** — `.txt`, `.md`, `.json`, `.xml`, `.csv`, `.html` (up to 10MB)
-- **PDF** — Automatic text extraction with AI fallback (up to 50MB)
-
-### Background Indexing
-
-When you upload a document:
-1. The file is immediately stored and appears in your document list
-2. Indexing (text extraction, chunking, embedding) runs in the background
-3. You can view the document immediately while indexing continues
-4. The document shows "Indexing..." status until complete
-5. Once indexed, the document shows a checkmark and is searchable via RAG
-
-Indexing always completes, even if you navigate away or close the browser tab (as long as the tab remains open in the background).
-
----
-
-## Document Viewer
-
-ChatNoire includes a **Document Viewer** with a Cursor-style 3-panel layout for reading and discussing documents.
-
-### Opening Documents
-
-Documents are **not** opened automatically when uploaded. To view a document:
-1. Go to the **Large Documents** section in the sidebar
-2. Click the **eye icon** (View button) on any document
-3. The document viewer opens as a full-screen overlay
-
-### Layout
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 📄 Document.pdf                              [Indexing...] │           [✕]  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ [Document Sidebar]       │  [PDF/Text Viewer]          │  [Chat Panel]      │
-│ (collapsible, resizable) │  (main content area)        │  (collapsible)     │
-│                          │                             │                    │
-│ > Documents              │  ┌─────────────────────┐    │  [Chat 1] [Chat 2] │
-│   • Calculus.pdf         │  │                     │    │  ─────────────────  │
-│   ○ Physics.pdf          │  │   PDF Page Render   │    │  Selection: [img]  │
-│   ○ Notes.md             │  │                     │    │                    │
-│                          │  │   [Drag to select]  │    │  User: Explain...  │
-│                          │  │   [┌───────────┐]   │    │  Claude: This...   │
-│                          │  │   [│ selection │]   │    │                    │
-│                          │  │   [└───────────┘]   │    │  ┌──────────────┐  │
-│                          │  └─────────────────────┘    │  │ [input...]   │  │
-│                          │  [◀ Page 1/50 ▶] [Zoom]     │  └──────────────┘  │
-│ [📄▸]                    │  [Capture (Enter)] [Cancel] │             [💬 2] │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-When sidebars are collapsed, intuitive icons with expand indicators appear:
-- Left sidebar: File icon with chevron (📄▸) 
-- Right chat panel: Message icon with chat count badge (💬 2)
-
-### Features
-
-- **Full-Screen Overlay** — Immersive reading experience with header bar (press ESC to close)
-- **PDF Viewer** — Native PDF rendering with page navigation and zoom
-- **Text Viewer** — Markdown rendering for text documents
-- **Screenshot Selection** — Drag to select a region, press Enter to capture and chat
-- **Multiple Chat Tabs** — Open multiple conversations side-by-side
-- **Resizable Panels** — Drag to resize using `react-resizable-panels`
-- **Collapsible Sidebars** — Collapse panels for more reading space with clear expand indicators
-- **Status Indicators** — Header shows document name, indexing status, and processing errors
-
-### How Screenshot Selection Works
-
-The screenshot-based selection provides a robust way to discuss any part of a document:
-
-1. **Drag** to draw a selection rectangle on the PDF
-2. A visual overlay shows your selection with page number
-3. Press **Enter** to capture (or click the "Capture" button)
-4. Press **Escape** to cancel the selection
-5. The screenshot is captured directly from the PDF canvas (fast, no external libraries)
-6. Claude (Sonnet) analyzes the visual content and responds
-
-This approach is more robust than text selection because:
-- Works with scanned PDFs, diagrams, charts, and images
-- Captures visual layout and formatting
-- No issues with PDF text layer misalignment
-- Supports any visual content, not just text
-- Uses native canvas capture for speed and reliability
-
-### Margin Chat Infrastructure
-
-The margin chat **fully reuses the existing chat infrastructure** with complete feature parity:
-
-- Same `/api/chat` endpoint and `useChat` hook as the main chat
-- **Shared `ChatMessage` component** for full markdown/LaTeX/code rendering
-- **Shared `ToolInvocationRenderer`** for displaying tool calls and results
-- All tools (KB search, document search, web search) work in margin chat
-- Syntax-highlighted code blocks, KaTeX math, GFM tables—identical to the main chat
-- Each chat tab is an independent conversation with its own history
-
-This ensures the document viewer chat has the exact same rendering quality as the main chat.
-
----
-
-## Chat History Search
-
-ChatNoire can search across your **past conversations** to find relevant context. This uses the same unified hybrid search as the Knowledge Base and Large Documents.
-
-| Tool | Description |
-|------|-------------|
-| `chat_search(query, topK?)` | Hybrid search across chat history (lexical + semantic + reranking) |
-
-### Features
-
-- **Hybrid Search** — Combines lexical (exact terms) and semantic (meaning) with RRF fusion
-- **Auto Query Detection** — Automatically detects query type (exact, semantic, or mixed)
-- **Cross-Encoder Reranking** — Optional reranking for 20-40% accuracy improvement
-- **Chunk Overlap** — 15% overlap between chunks to preserve context at boundaries
-- **Matched Terms** — Shows which terms matched for transparency
-
-Chat messages are automatically chunked (with overlap) and embedded when conversations are saved.
-
----
-
-## Web Search
-
-ChatNoire integrates Anthropic's first-party **web search** capability, giving Claude real-time access to the internet.
-
-### Features
-
-- Up to **5 searches per conversation** (configurable)
-- Automatic source citations
-- Optional domain allow/block lists
-- Optional user location for relevant results
-
-### When Claude Uses Web Search
-
-- Current events, news, or recent information
-- Up-to-date documentation or API references
-- User explicitly asks to search the web
-- Topics where training data might be outdated
-
----
-
 ## Adding Custom Tools
 
 ### Step 1: Create the Tool
 
-Create a new file in `/tools/` (e.g., `calculator.ts`):
-
 ```typescript
+// tools/calculator.ts
 import { tool } from "ai";
 import { z } from "zod";
 
@@ -629,17 +680,16 @@ export const calculatorTool = tool({
     expression: z.string().describe("Math expression to evaluate"),
   }),
   execute: async ({ expression }) => {
-    const result = eval(expression); // Use a safe math parser in production!
+    const result = eval(expression);
     return { expression, result };
   },
 });
 ```
 
-### Step 2: Register the Tool
-
-Add your tool to `/tools/index.ts`:
+### Step 2: Register It
 
 ```typescript
+// tools/index.ts
 import { calculatorTool } from "./calculator";
 
 export function createTools(apiKey: string): ToolSet {
@@ -647,133 +697,40 @@ export function createTools(apiKey: string): ToolSet {
     ...knowledgeTools,
     save_to_context: saveToContextTool,
     web_search: createWebSearchTool(apiKey),
-    calculator: calculatorTool,  // Add your tool here
+    calculator: calculatorTool,  // Add here
   };
 }
 ```
 
 ### Step 3: (Optional) Create a UI Component
 
-Create a component in `/components/tools/` to render your tool's results beautifully. See `knowledge-tool-view.tsx` or `web-search-view.tsx` for examples.
-
----
-
-## Customizing the Agent
-
-Edit `/agents/chat-agent.ts` to customize the agent's behavior. The `createChatAgent` function builds the agent with:
-
-- **Model**: Configurable between Haiku 4.5, Sonnet 4.5, and Opus 4.5 via the model selector
-- **Instructions**: System prompt with XML-structured context engineering
-- **Tools**: All tools from `/tools/index.ts` (KB, graph, documents, web search, context savers)
-- **KB Summary**: Pre-generated summary of your knowledge base for hybrid preload
-
-### Model Tiers
-
-| Tier | Model | Display Name | Best For |
-|------|-------|--------------|----------|
-| Haiku | claude-haiku-4-5-20251001 | Apprentice | Fast, simple tasks |
-| Sonnet | claude-sonnet-4-5-20250929 | Master | Balanced speed/quality |
-| Opus | claude-opus-4-5-20251101 | Grandmaster | Complex reasoning |
-
-### Context Engineering
-
-The system prompt follows research-backed context engineering principles:
-- XML-structured data at TOP (improves retrieval by up to 30%)
-- Quote-grounding instruction (improves accuracy by 20+ percentage points)
-- Hybrid preload strategy (summary + just-in-time retrieval)
-
----
-
-## Troubleshooting
-
-### "ANTHROPIC_API_KEY is not set" Error
-
-1. Ensure the file is named exactly `.env.local` (with the leading dot)
-2. Verify it's in the project root (same level as `package.json`)
-3. Check there are no spaces around the `=` sign
-4. Restart the dev server after creating the file
-
-### "invalid x-api-key" Error
-
-1. Verify you copied the full key (it's quite long)
-2. Ensure the key starts with `sk-ant-api03-`
-3. Check for extra spaces or quotes around the key
-4. Confirm the key hasn't been revoked in the Anthropic console
-
-### PDF Upload Requires API Key
-
-If you see an API key error when uploading PDFs, it means the PDF requires AI-powered OCR (scanned or image-based PDF). The system uses Claude Haiku via the free trial for this. Ensure your server has `ANTHROPIC_API_KEY` configured, or the system will use the free trial automatically.
-
-### Document Has Very Few Chunks
-
-If a PDF document has surprisingly few chunks (e.g., 9 chunks for a 20-page paper), this usually means PDF.js extracted low-quality text. Try:
-1. Delete the document
-2. Re-upload it — the improved quality detection should now trigger AI OCR fallback
+Create a component in `components/tools/` to render results. See `knowledge-tool-view.tsx` or `web-search-view.tsx` for examples.
 
 ---
 
 ## Tech Stack
 
-- **Framework**: Next.js 16 with App Router
-- **AI SDK**: Vercel AI SDK v6 (`ai` v6.0.34, `@ai-sdk/react`, `@ai-sdk/anthropic`)
-- **Model**: Claude Sonnet 4.5 (Anthropic)
-- **Embeddings**: OpenAI `text-embedding-3-small` (or `text-embedding-3-large` with dimension reduction)
-- **Reranking**: Cohere Rerank API or GPT-4o-mini fallback
-- **Additional Providers**: `@ai-sdk/openai`, `@ai-sdk/groq` (available for extensions)
-- **Authentication**: Better Auth with GitHub and Google OAuth
-- **Styling**: Tailwind CSS v4
-- **Components**: shadcn/ui + Radix UI
-- **Icons**: React Icons (Ionicons, FontAwesome, Material, BoxIcons, Ant Design)
-- **Markdown**: react-markdown with remark-gfm
-- **Math Rendering**: KaTeX with rehype-katex and remark-math
-- **Syntax Highlighting**: react-syntax-highlighter with Prism
-- **PDF Parsing**: pdfjs-dist (client-side extraction) + Claude Haiku (AI fallback with quality detection)
-- **PDF Viewing**: react-pdf for native PDF rendering
-- **Resizable Panels**: react-resizable-panels for document viewer layout
-- **Storage**: IndexedDB (via `idb`) for knowledge base, chat history, large documents, and file data
-- **Validation**: Zod
-- **Notifications**: Sonner
-
----
-
-## Authentication
-
-ChatNoire uses **Better Auth** for authentication with OAuth providers.
-
-### Owner vs BYOK Users
-
-| User Type | API Keys Used | Configuration |
-|-----------|---------------|---------------|
-| **Owner** | Server-side env keys | Email in `OWNER_EMAILS` |
-| **BYOK User** | Their own keys | Entered via Settings modal |
-
-Owner emails get free access using the API keys in your `.env.local`. Other users must provide their own keys through the Settings modal (stored in their browser's localStorage).
-
-### Setting Up OAuth
-
-1. **GitHub**: Create OAuth app at [github.com/settings/developers](https://github.com/settings/developers)
-   - Callback URL: `http://localhost:3000/api/auth/callback/github`
-
-2. **Google**: Create credentials at [console.cloud.google.com](https://console.cloud.google.com/apis/credentials)
-   - Callback URL: `http://localhost:3000/api/auth/callback/google`
-
----
-
-## Deploying to Vercel
-
-1. Push your code to GitHub
-2. Import the repository in [Vercel](https://vercel.com)
-3. Add environment variables in Project Settings:
-   - `ANTHROPIC_API_KEY`
-   - `OPENAI_API_KEY`
-   - `BETTER_AUTH_SECRET`
-   - `BETTER_AUTH_URL` (your production URL)
-   - `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
-   - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
-   - `OWNER_EMAILS`
-   - `COHERE_API_KEY` (optional)
-4. Update OAuth callback URLs to use your production domain
-5. Deploy!
+| Layer | Technology |
+|-------|-----------|
+| **Framework** | Next.js 16.0.10 (App Router, Turbopack) |
+| **Runtime** | React 19.2.1 |
+| **AI SDK** | Vercel AI SDK v6 (`ai` 6.0.34, `@ai-sdk/react` 3.0.35, `@ai-sdk/anthropic` 3.0.13) |
+| **Models** | Claude Haiku 4.5, Sonnet 4.5, Opus 4.6 (Anthropic) |
+| **Embeddings** | OpenAI `text-embedding-3-small` |
+| **Reranking** | Cohere Rerank API or GPT-4o-mini fallback |
+| **Auth** | Better Auth 1.4.15 (GitHub + Google OAuth) |
+| **Styling** | Tailwind CSS v4.1.9 + shadcn/ui + Radix UI |
+| **Icons** | Lucide React + React Icons |
+| **Markdown** | react-markdown 10.1.0 + remark-gfm |
+| **Math** | KaTeX 0.16.27 (rehype-katex + remark-math) |
+| **Code** | react-syntax-highlighter (Prism) |
+| **PDF Parsing** | pdfjs-dist 4.9.155 + Claude Haiku OCR fallback |
+| **PDF Viewing** | react-pdf 9.2.1 |
+| **Layout** | react-resizable-panels |
+| **Storage** | IndexedDB (via `idb` 8.0.3) |
+| **Validation** | Zod 3.25.76 |
+| **Notifications** | Sonner |
+| **Analytics** | Vercel Analytics |
 
 ---
 

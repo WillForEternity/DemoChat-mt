@@ -8,6 +8,9 @@
  * Version history:
  * - v1: Initial documents and chunks stores
  * - v2: Added metadata store for UMAP projection cache
+ * - v3: Added files store for original file data
+ * - v4: Migrated UMAP cache from single-record blob to individual per-document
+ *        records in a dedicated umap_projections store (LRU managed, max 10)
  */
 
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
@@ -22,9 +25,10 @@ const MAX_CACHED_PROJECTIONS = 10;
 
 /**
  * Cached UMAP projection for a single document's embedding visualization.
+ * Each projection is stored as its own IndexedDB record keyed by documentId.
  */
 export interface DocumentUmapProjection {
-  /** Document ID this projection is for */
+  /** Document ID this projection is for (also the record key) */
   documentId: string;
   /** 2D coordinates for each chunk */
   points: Array<{ chunkIndex: number; x: number; y: number }>;
@@ -35,11 +39,11 @@ export interface DocumentUmapProjection {
 }
 
 /**
- * Cache storing up to 10 most recently used document UMAP projections.
+ * @deprecated Retained for backward-compat during v4 migration.
+ * The old single-record cache format from v2/v3.
  */
 export interface DocumentUmapCache {
   id: "doc_umap_cache";
-  /** Array of cached projections, most recent first */
   projections: DocumentUmapProjection[];
 }
 
@@ -72,6 +76,10 @@ interface LargeDocumentsDbSchema extends DBSchema {
     key: string;
     value: LargeDocumentFile;
   };
+  umap_projections: {
+    key: string;
+    value: DocumentUmapProjection;
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<LargeDocumentsDbSchema>> | null = null;
@@ -81,8 +89,8 @@ let dbPromise: Promise<IDBPDatabase<LargeDocumentsDbSchema>> | null = null;
  */
 export function getLargeDocumentsDb() {
   if (!dbPromise) {
-    dbPromise = openDB<LargeDocumentsDbSchema>("large_documents_v1", 3, {
-      upgrade(db, oldVersion, newVersion) {
+    dbPromise = openDB<LargeDocumentsDbSchema>("large_documents_v1", 4, {
+      upgrade(db, oldVersion, newVersion, transaction) {
         console.log(`[LargeDocs DB] Upgrading from v${oldVersion} to v${newVersion}`);
 
         // Create documents store (v1)
@@ -101,7 +109,7 @@ export function getLargeDocumentsDb() {
           chunksStore.createIndex("by-hash", "contentHash", { unique: false });
         }
 
-        // Create metadata store for UMAP cache (v2)
+        // Create metadata store for UMAP cache (v2) - kept for migration
         if (!db.objectStoreNames.contains("metadata")) {
           console.log("[LargeDocs DB] Creating metadata store for UMAP cache");
           db.createObjectStore("metadata", { keyPath: "id" });
@@ -111,6 +119,30 @@ export function getLargeDocumentsDb() {
         if (!db.objectStoreNames.contains("files")) {
           console.log("[LargeDocs DB] Creating files store for document viewing");
           db.createObjectStore("files", { keyPath: "documentId" });
+        }
+
+        // Create per-document UMAP projections store (v4)
+        if (!db.objectStoreNames.contains("umap_projections")) {
+          console.log("[LargeDocs DB] Creating umap_projections store (individual records)");
+          db.createObjectStore("umap_projections", { keyPath: "documentId" });
+        }
+
+        // Migrate data from old single-blob metadata store → new umap_projections store (v3→v4)
+        if (oldVersion >= 2 && oldVersion < 4) {
+          console.log("[LargeDocs DB] Migrating UMAP cache from metadata → umap_projections");
+          const metadataStore = transaction.objectStore("metadata");
+          const umapStore = transaction.objectStore("umap_projections");
+          const request = metadataStore.get("doc_umap_cache");
+          request.onsuccess = () => {
+            const oldCache = request.result as DocumentUmapCache | undefined;
+            if (oldCache?.projections?.length) {
+              for (const proj of oldCache.projections) {
+                umapStore.put(proj);
+              }
+              metadataStore.delete("doc_umap_cache");
+              console.log(`[LargeDocs DB] Migrated ${oldCache.projections.length} UMAP projections`);
+            }
+          };
         }
 
         console.log("[LargeDocs DB] Upgrade complete");
@@ -126,12 +158,14 @@ export function getLargeDocumentsDb() {
 export async function clearLargeDocumentsDb(): Promise<void> {
   const db = await getLargeDocumentsDb();
   
-  const tx = db.transaction(["documents", "chunks", "metadata", "files"], "readwrite");
+  const storeNames: (keyof LargeDocumentsDbSchema)[] = ["documents", "chunks", "metadata", "files", "umap_projections"];
+  const tx = db.transaction(storeNames, "readwrite");
   await Promise.all([
     tx.objectStore("documents").clear(),
     tx.objectStore("chunks").clear(),
     tx.objectStore("metadata").clear(),
     tx.objectStore("files").clear(),
+    tx.objectStore("umap_projections").clear(),
     tx.done,
   ]);
 }
@@ -173,24 +207,26 @@ export async function deleteDocumentFile(documentId: string): Promise<void> {
 // =============================================================================
 // UMAP CACHE OPERATIONS
 // =============================================================================
+// Each UMAP projection is stored as its own record in umap_projections,
+// keyed by documentId. This avoids loading/writing all projections for every
+// single read/write. LRU eviction maintains the max cache size.
 
 /**
  * Get cached UMAP projection for a specific document.
  * Returns undefined if not cached or if chunk count has changed.
+ * O(1) lookup — reads only the requested document's record.
  */
 export async function getDocumentUmapCache(
   documentId: string,
   expectedChunkCount: number
 ): Promise<DocumentUmapProjection | undefined> {
   const db = await getLargeDocumentsDb();
-  const cache = await db.get("metadata", "doc_umap_cache");
+  const projection = await db.get("umap_projections", documentId);
   
-  if (!cache) return undefined;
-  
-  const projection = cache.projections.find((p) => p.documentId === documentId);
+  if (!projection) return undefined;
   
   // Invalidate if chunk count changed
-  if (projection && projection.chunkCount !== expectedChunkCount) {
+  if (projection.chunkCount !== expectedChunkCount) {
     return undefined;
   }
   
@@ -200,6 +236,7 @@ export async function getDocumentUmapCache(
 /**
  * Save UMAP projection for a document to cache.
  * Maintains LRU cache of up to MAX_CACHED_PROJECTIONS documents.
+ * Evicts the oldest projection if the cache is full.
  */
 export async function saveDocumentUmapCache(
   documentId: string,
@@ -207,49 +244,41 @@ export async function saveDocumentUmapCache(
   chunkCount: number
 ): Promise<void> {
   const db = await getLargeDocumentsDb();
-  
-  // Get existing cache
-  let cache = await db.get("metadata", "doc_umap_cache");
-  
-  if (!cache) {
-    cache = {
-      id: "doc_umap_cache",
-      projections: [],
-    };
-  }
-  
-  // Remove existing projection for this document (if any)
-  cache.projections = cache.projections.filter((p) => p.documentId !== documentId);
-  
-  // Add new projection at the front (most recent)
-  cache.projections.unshift({
+
+  const newProjection: DocumentUmapProjection = {
     documentId,
     points,
     computedAt: Date.now(),
     chunkCount,
-  });
-  
-  // Trim to max size (keep most recent)
-  if (cache.projections.length > MAX_CACHED_PROJECTIONS) {
-    cache.projections = cache.projections.slice(0, MAX_CACHED_PROJECTIONS);
+  };
+
+  // Check cache size and evict oldest if needed
+  const allProjections = await db.getAll("umap_projections");
+  // Exclude the current document from count (we're replacing it)
+  const othersCount = allProjections.filter((p) => p.documentId !== documentId).length;
+
+  if (othersCount >= MAX_CACHED_PROJECTIONS) {
+    // Evict the oldest projection (lowest computedAt) that isn't the current document
+    const others = allProjections
+      .filter((p) => p.documentId !== documentId)
+      .sort((a, b) => a.computedAt - b.computedAt);
+    
+    if (others.length > 0) {
+      await db.delete("umap_projections", others[0].documentId);
+    }
   }
-  
-  await db.put("metadata", cache);
-  console.log(`[LargeDocs] Cached UMAP projection for document (${cache.projections.length} cached total)`);
+
+  await db.put("umap_projections", newProjection);
+  console.log(`[LargeDocs] Cached UMAP projection for document ${documentId}`);
 }
 
 /**
  * Remove UMAP projection for a specific document from cache.
- * Called when a document is deleted.
+ * Called when a document is deleted. O(1) operation.
  */
 export async function removeDocumentUmapCache(documentId: string): Promise<void> {
   const db = await getLargeDocumentsDb();
-  const cache = await db.get("metadata", "doc_umap_cache");
-  
-  if (!cache) return;
-  
-  cache.projections = cache.projections.filter((p) => p.documentId !== documentId);
-  await db.put("metadata", cache);
+  await db.delete("umap_projections", documentId);
 }
 
 /**
@@ -257,5 +286,7 @@ export async function removeDocumentUmapCache(documentId: string): Promise<void>
  */
 export async function clearDocumentUmapCache(): Promise<void> {
   const db = await getLargeDocumentsDb();
-  await db.delete("metadata", "doc_umap_cache");
+  const tx = db.transaction("umap_projections", "readwrite");
+  await tx.store.clear();
+  await tx.done;
 }

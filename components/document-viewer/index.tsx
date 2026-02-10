@@ -112,28 +112,48 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
     });
   }, []);
 
-  // Poll for document status updates when viewing a processing document
+  // Poll for document status updates when viewing a processing document.
+  // Also handles reconciliation: when viewing a direct file (pending- ID),
+  // poll the document list to find the real indexed document by filename
+  // and transition to it seamlessly.
   useEffect(() => {
     if (!currentDocument) return;
-    if (currentDocument.status === "ready") return;
-    // Skip polling for pending documents (direct file view before storage)
-    if (currentDocument.id.startsWith("pending-")) return;
+    if (currentDocument.status === "ready" && !currentDocument.id.startsWith("pending-")) return;
     
     const pollInterval = setInterval(async () => {
-      const updated = await getLargeDocument(currentDocument.id);
-      if (updated && updated.status !== currentDocument.status) {
-        setCurrentDocument(updated);
-        // Also refresh the sidebar
+      if (currentDocument.id.startsWith("pending-")) {
+        // Direct file view — look for a real document with matching filename
+        // that has been stored (status !== undefined means it exists in IDB)
         const docs = await getAllLargeDocuments();
-        docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
-        setAllDocuments(docs.filter(d => d.status === "ready" || d.status === "indexing" || d.status === "uploading"));
+        const match = docs.find(
+          (d) => d.filename === currentDocument.filename && !d.id.startsWith("pending-")
+        );
+        if (match) {
+          console.log(`[DocViewer] Reconciled pending document → ${match.id} (${match.status})`);
+          setCurrentDocument(match);
+          // Clear direct file data so the viewer loads from IDB instead
+          setDirectArrayBuffer(null);
+          // Refresh sidebar
+          docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
+          setAllDocuments(docs.filter(d => d.status === "ready" || d.status === "indexing" || d.status === "uploading"));
+        }
+      } else {
+        // Known document — poll for status changes
+        const updated = await getLargeDocument(currentDocument.id);
+        if (updated && updated.status !== currentDocument.status) {
+          setCurrentDocument(updated);
+          // Also refresh the sidebar
+          const docs = await getAllLargeDocuments();
+          docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
+          setAllDocuments(docs.filter(d => d.status === "ready" || d.status === "indexing" || d.status === "uploading"));
+        }
       }
     }, 2000); // Poll every 2 seconds
 
     return () => clearInterval(pollInterval);
   }, [currentDocument]);
 
-  // Handle text selection - creates new chat tab
+  // Handle text selection - creates new chat tab with pending attachment
   const handleSelection = useCallback((selection: SelectionData) => {
     const id = crypto.randomUUID();
     const newChat: MarginChat = {
@@ -146,6 +166,24 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
     setChats((prev) => [...prev, newChat]);
     setActiveChat(id);
     // Auto-expand chat panel on first selection
+    if (chatPanelRef.current?.isCollapsed()) {
+      chatPanelRef.current.expand();
+    }
+  }, []);
+
+  // Create a new empty chat (no selection)
+  const handleNewChat = useCallback(() => {
+    const id = crypto.randomUUID();
+    const newChat: MarginChat = {
+      id,
+      chatId: `margin-${id}`,
+      selection: {}, // Empty selection
+      messages: [],
+      title: "New Chat",
+    };
+    setChats((prev) => [...prev, newChat]);
+    setActiveChat(id);
+    // Auto-expand chat panel
     if (chatPanelRef.current?.isCollapsed()) {
       chatPanelRef.current.expand();
     }
@@ -346,6 +384,7 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
               onCollapse={() => chatPanelRef.current?.collapse()}
               onMessagesChange={handleMessagesChange}
               onTitleChange={handleTitleChange}
+              onNewChat={handleNewChat}
             />
           )}
         </Panel>

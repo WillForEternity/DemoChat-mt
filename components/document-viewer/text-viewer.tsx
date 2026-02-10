@@ -5,13 +5,16 @@
  *
  * Renders text/markdown documents with selection support.
  * When text is selected, triggers callback to create a chat.
+ *
+ * Loads original file data from IndexedDB `files` store for faithful rendering.
+ * Falls back to chunk reconstruction only if the original file is unavailable.
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Loader2 } from "lucide-react";
-import { loadDocumentContent } from "@/knowledge/large-documents";
+import { getLargeDocumentFile, loadDocumentContent } from "@/knowledge/large-documents";
 import type { SelectionData } from "./index";
 
 interface TextViewerProps {
@@ -25,24 +28,39 @@ export function TextViewer({ documentId, onSelection }: TextViewerProps) {
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Load document content from chunks
+  // Load document content - prefer original file, fall back to chunk reconstruction
   useEffect(() => {
     setIsLoading(true);
     setError(null);
-    loadDocumentContent(documentId)
-      .then((text) => {
+
+    (async () => {
+      try {
+        // Try loading the original file first (faithful, no overlap duplication)
+        const file = await getLargeDocumentFile(documentId);
+        if (file) {
+          const decoder = new TextDecoder("utf-8");
+          const text = decoder.decode(file.data);
+          if (text) {
+            setContent(text);
+            return;
+          }
+        }
+
+        // Fall back to chunk reconstruction if original file not available
+        // (e.g. document was indexed before files store was added)
+        console.warn("[TextViewer] Original file not found, falling back to chunk reconstruction");
+        const text = await loadDocumentContent(documentId);
         if (text) {
           setContent(text);
         } else {
           setError("Document content not found");
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load document");
-      })
-      .finally(() => {
+      } finally {
         setIsLoading(false);
-      });
+      }
+    })();
   }, [documentId]);
 
   // Handle text selection on mouseup

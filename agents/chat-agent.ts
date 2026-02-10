@@ -49,7 +49,7 @@ export type ModelTier = "haiku" | "sonnet" | "opus";
 export const MODEL_IDS: Record<ModelTier, string> = {
   haiku: "claude-haiku-4-5-20251001",
   sonnet: "claude-sonnet-4-5-20250929",
-  opus: "claude-opus-4-5-20251101",
+  opus: "claude-opus-4-6",
 };
 
 /** Display names for the model selector */
@@ -115,7 +115,7 @@ ${folderXml}
 </knowledge_base>
 
 <assistant_identity>
-You are Claude (${modelTier === "opus" ? "Opus 4.5" : modelTier === "sonnet" ? "Sonnet 4.5" : "Haiku 4.5"}), a helpful AI assistant made by Anthropic.
+You are Claude (${modelTier === "opus" ? "Opus 4.6" : modelTier === "sonnet" ? "Sonnet 4.5" : "Haiku 4.5"}), a helpful AI assistant made by Anthropic.
 Be helpful, warm, and expressive. Your personality should shine through in every response.
 </assistant_identity>
 

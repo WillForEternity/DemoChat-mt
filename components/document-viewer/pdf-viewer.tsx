@@ -103,84 +103,32 @@ interface PDFViewerProps {
   onSelectionStateChange?: (hasSelection: boolean) => void;
 }
 
-// Number of pages to render around the current visible page for smooth scrolling
-const PAGES_TO_PRERENDER = 2;
-
-// Number of initial pages to always prioritize loading (top-first approach)
-const PRIORITY_PAGES = 3;
-
-// Background preloading interval (ms) - how often to queue another page
-const PRELOAD_INTERVAL_MS = 300;
-
-// Maximum number of pages to preload per interval tick
-const PAGES_PER_TICK = 1;
-
 // =============================================================================
-// ADAPTIVE MEMORY MANAGEMENT
+// SLIDING WINDOW CONFIGURATION
 // =============================================================================
-// For small documents, keep all pages rendered (best UX).
-// For larger documents, use a sliding window to limit memory usage.
-// This prevents memory issues with 100+ page documents.
+// Only a small window of pages is ever rendered at once.
+// This keeps memory usage bounded regardless of document size.
+// The window slides as the user scrolls, with a debounce to avoid thrashing.
 
-// Threshold: documents with this many pages or fewer keep all pages rendered
-const SMALL_DOC_THRESHOLD = 30;
+// Pages rendered around the visible page (total window ≈ 2 * BUFFER + 1)
+const PAGE_BUFFER = 3;
 
-// For medium docs (31-100 pages), keep this many pages rendered
-const MEDIUM_DOC_WINDOW = 20;
-
-// For large docs (100+ pages), keep this many pages rendered  
-const LARGE_DOC_WINDOW = 15;
-
-// Large doc threshold
-const LARGE_DOC_THRESHOLD = 100;
+// Debounce delay (ms) for visiblePage updates from IntersectionObserver.
+// Prevents rapid state churn during fast scrolling.
+const SCROLL_DEBOUNCE_MS = 150;
 
 /**
- * Calculate how many pages to keep rendered based on document size.
+ * Calculate the set of pages that should be rendered given a center page.
+ * Returns a Set containing at most (2 * PAGE_BUFFER + 1) page numbers.
  */
-function getRetentionWindow(numPages: number): number {
-  if (numPages <= SMALL_DOC_THRESHOLD) {
-    return numPages; // Keep all pages for small docs
-  } else if (numPages <= LARGE_DOC_THRESHOLD) {
-    return MEDIUM_DOC_WINDOW;
-  } else {
-    return LARGE_DOC_WINDOW;
+function getWindowPages(centerPage: number, numPages: number): Set<number> {
+  const pages = new Set<number>();
+  const start = Math.max(1, centerPage - PAGE_BUFFER);
+  const end = Math.min(numPages, centerPage + PAGE_BUFFER);
+  for (let i = start; i <= end; i++) {
+    pages.add(i);
   }
-}
-
-/**
- * Calculate which pages should be in the retention window.
- * Centers on visiblePage with slight forward bias (users scroll down more).
- */
-function getRetentionRange(visiblePage: number, numPages: number): { start: number; end: number } {
-  const windowSize = getRetentionWindow(numPages);
-  
-  // If keeping all pages, return full range
-  if (windowSize >= numPages) {
-    return { start: 1, end: numPages };
-  }
-  
-  // Slight forward bias: 40% before, 60% after visible page
-  const pagesBefore = Math.floor(windowSize * 0.4);
-  const pagesAfter = windowSize - pagesBefore - 1; // -1 for visible page itself
-  
-  let start = visiblePage - pagesBefore;
-  let end = visiblePage + pagesAfter;
-  
-  // Adjust if we hit boundaries
-  if (start < 1) {
-    end += (1 - start);
-    start = 1;
-  }
-  if (end > numPages) {
-    start -= (end - numPages);
-    end = numPages;
-  }
-  
-  // Final clamp
-  start = Math.max(1, start);
-  end = Math.min(numPages, end);
-  
-  return { start, end };
+  return pages;
 }
 
 // Selection rectangle state
@@ -201,11 +149,15 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   const [error, setError] = useState<string | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [visiblePage, setVisiblePage] = useState(1);
+  const visiblePageRef = useRef(1); // Ref mirror to avoid observer dependency on visiblePage
   const [scale, setScale] = useState(1.0);
   const [loadedPages, setLoadedPages] = useState<Set<number>>(new Set([1]));
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const observerRef = useRef<IntersectionObserver | null>(null);
+  
+  // Track measured page dimensions (width x height at scale=1) for accurate placeholders
+  const pageDimensionsRef = useRef<Map<number, { width: number; height: number }>>(new Map());
   
   // Selection state
   const [isSelecting, setIsSelecting] = useState(false);
@@ -216,8 +168,16 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   // Color inversion state
   const [isInverted, setIsInverted] = useState(false);
 
+  // Page input state for direct "go to page" navigation
+  const [pageInputValue, setPageInputValue] = useState("");
+  const [isPageInputFocused, setIsPageInputFocused] = useState(false);
+  const pageInputRef = useRef<HTMLInputElement>(null);
+
   // Selection hint banner dismissed state
   const [hintDismissed, setHintDismissed] = useState(false);
+
+  // Flag to suppress observer-driven page changes during zoom
+  const isZoomingRef = useRef(false);
 
   // Notify parent about selection state changes
   useEffect(() => {
@@ -236,7 +196,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
       setIsLoading(false);
       setError(null);
       setLoadedPages(new Set([1]));
-      setRenderedPages(new Set([1, 2, 3])); // Reset rendered pages for new document
+      setRenderedPages(getWindowPages(1, 1)); // Reset rendered pages for new document
       setHintDismissed(false); // Show hint for new document
     }
   }, [directFileData]);
@@ -266,7 +226,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     setIsLoading(true);
     setError(null);
     setLoadedPages(new Set([1])); // Reset to first page
-    setRenderedPages(new Set([1, 2, 3])); // Reset rendered pages
+    setRenderedPages(getWindowPages(1, 1)); // Reset rendered pages
     setHintDismissed(false); // Show hint for new document
 
     getCachedPDF(documentId)
@@ -290,146 +250,61 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     return () => { cancelled = true; };
   }, [documentId, directFileData, fileData]);
 
-  // Track which pages should be rendered
-  // Uses adaptive memory management: small docs keep all, large docs use sliding window
-  const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set([1, 2, 3]));
+  // Track which pages should be rendered — always a small sliding window.
+  const [renderedPages, setRenderedPages] = useState<Set<number>>(() => getWindowPages(1, 1));
   
   // =============================================================================
-  // SLIDING WINDOW WITH EVICTION
+  // SLIDING WINDOW — the only effect that manages renderedPages
   // =============================================================================
-  // For small documents (≤30 pages): keep all pages rendered
-  // For larger documents: maintain a sliding window around visible page
-  // Pages outside the window are evicted to save memory
+  // When visiblePage or numPages change, recompute the window.
+  // The functional updater compares old vs new to avoid unnecessary re-renders.
   
   useEffect(() => {
     if (numPages === 0) return;
     
-    const { start: retentionStart, end: retentionEnd } = getRetentionRange(visiblePage, numPages);
-    const windowSize = getRetentionWindow(numPages);
-    const shouldEvict = windowSize < numPages;
+    const target = getWindowPages(visiblePage, numPages);
     
     setRenderedPages(prev => {
-      const updated = new Set<number>();
-      
-      // Always include priority pages at the start (for quick initial load)
-      for (let i = 1; i <= Math.min(PRIORITY_PAGES, numPages); i++) {
-        // Only keep priority pages if they're within retention window OR doc is small
-        if (!shouldEvict || (i >= retentionStart && i <= retentionEnd)) {
-          updated.add(i);
+      // Quick equality check: same size and all target pages already present
+      if (target.size === prev.size) {
+        let same = true;
+        for (const p of target) {
+          if (!prev.has(p)) { same = false; break; }
         }
+        if (same) return prev; // No change — bail out to avoid re-render
       }
-      
-      // Add all pages within the retention window
-      for (let i = retentionStart; i <= retentionEnd; i++) {
-        updated.add(i);
-      }
-      
-      // Ensure immediate scroll buffer is always included
-      const bufferStart = Math.max(1, visiblePage - PAGES_TO_PRERENDER);
-      const bufferEnd = Math.min(numPages, visiblePage + PAGES_TO_PRERENDER);
-      for (let i = bufferStart; i <= bufferEnd; i++) {
-        updated.add(i);
-      }
-      
-      // Check if we need to update state
-      // Update if: different size, or any pages changed
-      if (updated.size !== prev.size) {
-        return updated;
-      }
-      
-      // Check if contents are the same
-      for (const page of updated) {
-        if (!prev.has(page)) {
-          return updated;
-        }
-      }
-      
-      return prev; // No change
+      return target;
     });
   }, [visiblePage, numPages]);
-
-  // =============================================================================
-  // BACKGROUND PRELOADING (within retention window)
-  // =============================================================================
-  // Systematically preload pages within the retention window in order of 
-  // distance from the visible page. This fills the window smoothly without
-  // waiting for user scroll.
   
-  useEffect(() => {
-    if (numPages === 0) return;
-    
-    const { start: retentionStart, end: retentionEnd } = getRetentionRange(visiblePage, numPages);
-    
-    // Calculate how many pages should be in the window
-    const targetSize = retentionEnd - retentionStart + 1;
-    
-    // Check if window is already full
-    let pagesInWindow = 0;
-    for (let i = retentionStart; i <= retentionEnd; i++) {
-      if (renderedPages.has(i)) pagesInWindow++;
-    }
-    if (pagesInWindow >= targetSize) return;
-    
-    const intervalId = setInterval(() => {
-      setRenderedPages(prev => {
-        // Recalculate in case visiblePage changed
-        const { start, end } = getRetentionRange(visiblePage, numPages);
-        
-        // Check if window is full
-        let currentInWindow = 0;
-        for (let i = start; i <= end; i++) {
-          if (prev.has(i)) currentInWindow++;
-        }
-        if (currentInWindow >= (end - start + 1)) {
-          return prev; // Window is full
-        }
-        
-        const updated = new Set(prev);
-        let addedCount = 0;
-        
-        // Find pages to add within retention window, prioritizing by distance
-        for (let distance = 0; distance <= numPages && addedCount < PAGES_PER_TICK; distance++) {
-          // Check page above (visiblePage - distance)
-          const pageAbove = visiblePage - distance;
-          if (pageAbove >= start && pageAbove <= end && !updated.has(pageAbove)) {
-            updated.add(pageAbove);
-            addedCount++;
-            if (addedCount >= PAGES_PER_TICK) break;
-          }
-          
-          // Check page below (visiblePage + distance)
-          const pageBelow = visiblePage + distance;
-          if (distance > 0 && pageBelow >= start && pageBelow <= end && !updated.has(pageBelow)) {
-            updated.add(pageBelow);
-            addedCount++;
-            if (addedCount >= PAGES_PER_TICK) break;
-          }
-        }
-        
-        if (updated.size !== prev.size) {
-          return updated;
-        }
-        return prev;
-      });
-    }, PRELOAD_INTERVAL_MS);
-    
-    return () => clearInterval(intervalId);
-  }, [numPages, visiblePage, renderedPages.size]);
-  
-  // Convert to sorted array for rendering
+  // Convert to sorted array for rendering (used in JSX map)
   const pagesToRender = useMemo(() => {
     return Array.from(renderedPages).sort((a, b) => a - b);
   }, [renderedPages]);
 
-  // Setup IntersectionObserver to detect which page is visible
+  // Keep visiblePageRef in sync with visiblePage state
+  useEffect(() => {
+    visiblePageRef.current = visiblePage;
+  }, [visiblePage]);
+
+  // Debounce timer ref for scroll-based visiblePage updates
+  const scrollDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Setup IntersectionObserver to detect which page is visible.
+  // IMPORTANT: Do NOT include visiblePage in deps — the observer must persist.
+  // We debounce state updates to prevent cascading re-renders during fast scroll.
   useEffect(() => {
     if (!containerRef.current || numPages === 0) return;
 
     observerRef.current = new IntersectionObserver(
       (entries) => {
+        // Skip observer updates while a zoom operation is in progress.
+        // The zoom handler will restore the correct scroll position.
+        if (isZoomingRef.current) return;
+
         // Find the most visible page
         let maxRatio = 0;
-        let mostVisiblePage = visiblePage;
+        let mostVisiblePage = visiblePageRef.current;
 
         entries.forEach((entry) => {
           if (entry.isIntersecting && entry.intersectionRatio > maxRatio) {
@@ -439,20 +314,33 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
           }
         });
 
-        if (mostVisiblePage !== visiblePage) {
-          setVisiblePage(mostVisiblePage);
+        if (mostVisiblePage !== visiblePageRef.current) {
+          // Update the ref immediately (cheap, no re-render)
+          visiblePageRef.current = mostVisiblePage;
+          
+          // Debounce the state update to avoid re-render storms during fast scroll
+          if (scrollDebounceRef.current) clearTimeout(scrollDebounceRef.current);
+          scrollDebounceRef.current = setTimeout(() => {
+            setVisiblePage(visiblePageRef.current);
+          }, SCROLL_DEBOUNCE_MS);
         }
       },
       {
         root: containerRef.current,
-        threshold: [0.1, 0.5, 0.9],
+        threshold: [0.25, 0.75],
       }
     );
 
+    // Re-observe all existing page elements (they may already be in the DOM)
+    for (const [, element] of pageRefs.current.entries()) {
+      observerRef.current.observe(element);
+    }
+
     return () => {
       observerRef.current?.disconnect();
+      if (scrollDebounceRef.current) clearTimeout(scrollDebounceRef.current);
     };
-  }, [numPages, visiblePage]);
+  }, [numPages]); // Only recreate when numPages changes (new document loaded)
 
   // Register page elements with the observer
   const registerPageRef = useCallback((pageNum: number, element: HTMLDivElement | null) => {
@@ -679,9 +567,16 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     setLoadedPages(new Set([1]));
   }, []);
 
-  // Handle page load success - track which pages are loaded
-  const handlePageLoadSuccess = useCallback((pageNum: number) => {
+  // Handle page load success - track which pages are loaded and measure dimensions
+  const handlePageLoadSuccess = useCallback((pageNum: number, page: any) => {
     setLoadedPages((prev) => new Set([...prev, pageNum]));
+    // Store the original page dimensions (at scale 1.0) for accurate placeholders
+    if (page && page.originalWidth && page.originalHeight) {
+      pageDimensionsRef.current.set(pageNum, {
+        width: page.originalWidth,
+        height: page.originalHeight,
+      });
+    }
   }, []);
 
   // Handle document load error
@@ -690,18 +585,147 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     setError("Failed to load PDF");
   }, []);
 
-  // Scroll to specific page
+  // Scroll to specific page — recenters the sliding window and scrolls.
   const scrollToPage = useCallback((pageNum: number) => {
-    const pageElement = pageRefs.current.get(pageNum);
-    if (pageElement) {
-      pageElement.scrollIntoView({ behavior: "smooth", block: "start" });
+    const targetPage = Math.max(1, Math.min(numPages || pageNum, pageNum));
+    
+    // Recenter the window on the target page (this also evicts distant pages)
+    const target = getWindowPages(targetPage, numPages || targetPage);
+    setRenderedPages(target);
+    
+    // Update visible page (and ref) immediately
+    visiblePageRef.current = targetPage;
+    setVisiblePage(targetPage);
+    
+    // Cancel any pending debounce so it doesn't overwrite our explicit navigation
+    if (scrollDebounceRef.current) {
+      clearTimeout(scrollDebounceRef.current);
+      scrollDebounceRef.current = null;
     }
-    setVisiblePage(pageNum);
-  }, []);
+    
+    // Try to scroll to the element; retry if React hasn't rendered it yet.
+    const tryScroll = (attempts: number) => {
+      const pageElement = pageRefs.current.get(targetPage);
+      if (pageElement) {
+        pageElement.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else if (attempts > 0) {
+        requestAnimationFrame(() => setTimeout(() => tryScroll(attempts - 1), 50));
+      }
+    };
+    tryScroll(10); // Up to ~500ms of retries
+  }, [numPages]);
+
+  // Intercept internal PDF link clicks (annotation layer)
+  // react-pdf renders annotation links that may point to other pages via hash fragments
+  // like "#page=5" or data attributes. We intercept these to use our scrollToPage which
+  // ensures the target page is rendered before scrolling.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleLinkClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const anchor = target.closest("a");
+      if (!anchor) return;
+
+      const href = anchor.getAttribute("href") || "";
+      
+      // Match internal page links: #page=N, #N, or [data-page-number] patterns
+      // react-pdf annotation layer uses various formats
+      const pageMatch = href.match(/^#(?:page=|nameddest=)?(\d+)$/i);
+      if (pageMatch) {
+        e.preventDefault();
+        e.stopPropagation();
+        const targetPage = parseInt(pageMatch[1], 10);
+        if (targetPage >= 1 && targetPage <= (numPages || Infinity)) {
+          scrollToPage(targetPage);
+        }
+        return;
+      }
+      
+      // Also intercept react-pdf internal link annotations that use data attributes
+      const pageNumAttr = anchor.getAttribute("data-page-number");
+      if (pageNumAttr) {
+        e.preventDefault();
+        e.stopPropagation();
+        const targetPage = parseInt(pageNumAttr, 10);
+        if (targetPage >= 1 && targetPage <= (numPages || Infinity)) {
+          scrollToPage(targetPage);
+        }
+        return;
+      }
+
+      // For react-pdf's internal destination links, check for the dest attribute
+      const dest = anchor.getAttribute("data-dest");
+      if (dest && href.startsWith("#")) {
+        // Prevent default navigation which would fail
+        e.preventDefault();
+        e.stopPropagation();
+        // The destination might resolve to a page - let react-pdf handle the resolution
+        // but we at least prevent the error by not letting the browser try to navigate
+        return;
+      }
+    };
+
+    container.addEventListener("click", handleLinkClick, true); // Use capture phase
+    return () => container.removeEventListener("click", handleLinkClick, true);
+  }, [numPages, scrollToPage]);
 
   // Jump to first/last page
   const scrollToFirst = useCallback(() => scrollToPage(1), [scrollToPage]);
   const scrollToLast = useCallback(() => scrollToPage(numPages), [scrollToPage, numPages]);
+
+  // Zoom handler that preserves the current page position.
+  // When scale changes, page elements resize and the scroll offset shifts,
+  // which can cause the viewport to land on a different page. We counteract
+  // this by recording the visible page before zooming and scrolling back to
+  // it after React re-renders at the new scale.
+  const handleZoom = useCallback((direction: "in" | "out") => {
+    const container = containerRef.current;
+    if (!container) {
+      setScale((s) => direction === "in" ? Math.min(2.5, s + 0.1) : Math.max(0.5, s - 0.1));
+      return;
+    }
+
+    // Remember the page we're on and how far through it we've scrolled
+    const currentPage = visiblePageRef.current;
+    const pageElement = pageRefs.current.get(currentPage);
+
+    // Compute the fractional scroll position within the current page.
+    // This lets us restore the exact same relative position after zoom.
+    let scrollFraction = 0;
+    if (pageElement) {
+      const pageRect = pageElement.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      // How far the top of the page is above the top of the container viewport
+      const pageOffset = containerRect.top - pageRect.top;
+      scrollFraction = pageRect.height > 0 ? pageOffset / pageRect.height : 0;
+    }
+
+    // Suppress observer updates during the zoom transition
+    isZoomingRef.current = true;
+
+    setScale((s) => direction === "in" ? Math.min(2.5, s + 0.1) : Math.max(0.5, s - 0.1));
+
+    // After React re-renders with the new scale, restore scroll position
+    requestAnimationFrame(() => {
+      const el = pageRefs.current.get(currentPage);
+      if (el && container) {
+        const newPageRect = el.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        // Calculate where the page top currently is relative to the container's scroll
+        const currentPageTopInContainer = containerRect.top - newPageRect.top;
+        const desiredOffset = scrollFraction * newPageRect.height;
+        const scrollAdjustment = desiredOffset - currentPageTopInContainer;
+        container.scrollTop += scrollAdjustment;
+      }
+
+      // Re-enable observer after a short delay to let scroll settle
+      setTimeout(() => {
+        isZoomingRef.current = false;
+      }, 200);
+    });
+  }, []);
 
   // Memoize the file prop to prevent unnecessary reloads
   // react-pdf warns if the file object changes reference even when data is the same
@@ -815,7 +839,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
       {/* PDF Content - Scrollable, renders visible pages + buffer */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-auto bg-gray-100 dark:bg-neutral-950 flex flex-col items-center py-4 gap-4 select-none"
+        className="flex-1 overflow-auto bg-gray-100 dark:bg-black flex flex-col items-center py-4 gap-4 select-none"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
@@ -826,6 +850,11 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
           file={fileSource}
           onLoadSuccess={handleLoadSuccess}
           onLoadError={handleLoadError}
+          onItemClick={({ pageNumber }) => {
+            if (pageNumber && pageNumber >= 1) {
+              scrollToPage(pageNumber);
+            }
+          }}
           className="flex flex-col items-center gap-4"
           loading={
             <div className="flex items-center justify-center py-20">
@@ -839,6 +868,22 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
             const activeSelection = (selectionRect?.page === pageNum) ? selectionRect : 
                                     (pendingSelection?.page === pageNum) ? pendingSelection : null;
             
+            // Calculate placeholder dimensions using measured page size, or a sensible default.
+            // This ensures scroll positions stay accurate even for unrendered pages.
+            const measured = pageDimensionsRef.current.get(pageNum);
+            // Fall back to page 1's dimensions (most common case), then to a default
+            const fallbackMeasured = pageDimensionsRef.current.get(1);
+            const placeholderHeight = measured
+              ? measured.height * scale
+              : fallbackMeasured
+                ? fallbackMeasured.height * scale
+                : 800;
+            const placeholderWidth = measured
+              ? measured.width * scale
+              : fallbackMeasured
+                ? fallbackMeasured.width * scale
+                : undefined;
+            
             return (
               <div
                 key={pageNum}
@@ -846,7 +891,8 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
                 data-page={pageNum}
                 className="relative"
                 style={{ 
-                  minHeight: shouldRender ? undefined : 800, // Placeholder height for unloaded pages
+                  minHeight: shouldRender ? undefined : placeholderHeight,
+                  width: shouldRender ? undefined : placeholderWidth,
                   filter: isInverted ? "invert(1) hue-rotate(180deg)" : undefined,
                 }}
               >
@@ -856,18 +902,24 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
                     scale={scale}
                     renderTextLayer={false}
                     renderAnnotationLayer={true}
-                    className="shadow-lg bg-white"
-                    onLoadSuccess={() => handlePageLoadSuccess(pageNum)}
+                    className="bg-white"
+                    onLoadSuccess={(page: any) => handlePageLoadSuccess(pageNum, page)}
                     loading={
-                      <div className="flex items-center justify-center py-20 min-h-[600px] bg-white shadow-lg">
+                      <div 
+                        className="flex items-center justify-center bg-white"
+                        style={{ minHeight: placeholderHeight, width: placeholderWidth }}
+                      >
                         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                       </div>
                     }
                     canvasBackground={isInverted ? undefined : "white"}
                   />
                 ) : (
-                  // Placeholder for unrendered pages
-                  <div className="flex items-center justify-center py-20 min-h-[600px] bg-muted/50 shadow-lg rounded">
+                  // Placeholder for unrendered pages - uses measured dimensions for accuracy
+                  <div 
+                    className="flex items-center justify-center bg-muted/50 rounded"
+                    style={{ minHeight: placeholderHeight, width: placeholderWidth }}
+                  >
                     <span className="text-sm text-muted-foreground">Page {pageNum}</span>
                   </div>
                 )}
@@ -930,9 +982,56 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
           >
             <ChevronLeft className="h-4 w-4 text-gray-600 dark:text-neutral-400" />
           </button>
-          <span className="text-sm min-w-[80px] text-center text-gray-700 dark:text-neutral-300">
-            Page {visiblePage} of {numPages || "..."}
-          </span>
+          <div className="flex items-center gap-1 text-sm text-gray-700 dark:text-neutral-300">
+            <span>Page</span>
+            <input
+              ref={pageInputRef}
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={isPageInputFocused ? pageInputValue : String(visiblePage)}
+              onChange={(e) => {
+                // Only allow digits
+                const val = e.target.value.replace(/\D/g, "");
+                setPageInputValue(val);
+              }}
+              onFocus={() => {
+                setIsPageInputFocused(true);
+                setPageInputValue(String(visiblePage));
+                // Select all text on focus for easy overwrite
+                requestAnimationFrame(() => pageInputRef.current?.select());
+              }}
+              onBlur={() => {
+                setIsPageInputFocused(false);
+                setPageInputValue("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const page = parseInt(pageInputValue, 10);
+                  if (!isNaN(page) && page >= 1 && page <= numPages) {
+                    scrollToPage(page);
+                  }
+                  pageInputRef.current?.blur();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setPageInputValue("");
+                  pageInputRef.current?.blur();
+                }
+              }}
+              style={{ width: `${Math.max(3, String(numPages || 1).length + 1)}ch` }}
+              className={cn(
+                "text-center text-sm font-medium rounded-md px-1 py-0.5 transition-all duration-200",
+                "bg-transparent hover:bg-gray-100 dark:hover:bg-neutral-800",
+                "focus:bg-white dark:focus:bg-neutral-900 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/50 dark:focus:ring-[#ff00ff]/50",
+                "border border-transparent focus:border-gray-300 dark:focus:border-neutral-600",
+                "text-gray-700 dark:text-neutral-300"
+              )}
+              title="Type a page number and press Enter to navigate"
+            />
+            <span>of {numPages || "..."}</span>
+          </div>
           <button
             onClick={() => scrollToPage(Math.min(numPages, visiblePage + 1))}
             disabled={visiblePage >= numPages}
@@ -974,7 +1073,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
         {/* Zoom Controls */}
         <div className="flex items-center gap-2 border-l border-gray-200 dark:border-neutral-700 pl-4">
           <button
-            onClick={() => setScale((s) => Math.max(0.5, s - 0.1))}
+            onClick={() => handleZoom("out")}
             className={cn(
               "p-2 rounded-xl transition-all duration-200",
               "bg-white dark:bg-neutral-950",
@@ -993,7 +1092,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
             {Math.round(scale * 100)}%
           </span>
           <button
-            onClick={() => setScale((s) => Math.min(2.5, s + 0.1))}
+            onClick={() => handleZoom("in")}
             className={cn(
               "p-2 rounded-xl transition-all duration-200",
               "bg-white dark:bg-neutral-950",

@@ -377,22 +377,57 @@ export async function indexLargeDocumentInBackground(
       message: `Embedding ${chunks.length} chunks...`,
     });
 
+    // Load existing chunks for this document (for content hash change detection).
+    // If a chunk's text hasn't changed (same SHA-256 hash), we reuse the existing
+    // embedding instead of re-computing it — saving API calls and time.
+    const existingChunks = await db.getAllFromIndex("chunks", "by-document", documentId);
+    const existingHashMap = new Map<string, LargeDocumentChunk>();
+    for (const c of existingChunks) {
+      existingHashMap.set(c.contentHash, c);
+    }
+    const reusedCount = { value: 0 };
+
     // Embed chunks in batches (20 at a time to avoid API limits)
     const BATCH_SIZE = 20;
     const allChunkRecords: LargeDocumentChunk[] = [];
 
     for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
       const batch = chunks.slice(i, i + BATCH_SIZE);
-      const batchTexts = batch.map((c) => c.text);
 
-      // Embed the batch
-      const embeddings = await embedTexts(batchTexts);
+      // Compute hashes first to detect unchanged chunks
+      const batchHashes: string[] = [];
+      const needsEmbedding: { batchIdx: number; text: string }[] = [];
+      for (let j = 0; j < batch.length; j++) {
+        const hash = await sha256(batch[j].text);
+        batchHashes.push(hash);
+        const existing = existingHashMap.get(hash);
+        if (!existing) {
+          needsEmbedding.push({ batchIdx: j, text: batch[j].text });
+        }
+      }
 
-      // Create chunk records
+      // Only call the embedding API for chunks that actually changed
+      let newEmbeddings: number[][] = [];
+      if (needsEmbedding.length > 0) {
+        newEmbeddings = await embedTexts(needsEmbedding.map((n) => n.text));
+      }
+
+      // Build chunk records, reusing existing embeddings where possible
+      let newEmbIdx = 0;
       for (let j = 0; j < batch.length; j++) {
         const chunk = batch[j];
         const chunkIndex = i + j;
-        const contentHash = await sha256(chunk.text);
+        const contentHash = batchHashes[j];
+        const existing = existingHashMap.get(contentHash);
+
+        let embedding: number[];
+        if (existing) {
+          // Reuse existing embedding — content unchanged
+          embedding = existing.embedding;
+          reusedCount.value++;
+        } else {
+          embedding = newEmbeddings[newEmbIdx++];
+        }
 
         const chunkRecord: LargeDocumentChunk = {
           id: `${documentId}#${chunkIndex}`,
@@ -401,7 +436,7 @@ export async function indexLargeDocumentInBackground(
           chunkText: chunk.text,
           contentHash,
           headingPath: chunk.headingPath,
-          embedding: embeddings[j],
+          embedding,
           updatedAt: Date.now(),
         };
 
@@ -421,10 +456,22 @@ export async function indexLargeDocumentInBackground(
       });
     }
 
-    // Store all chunks
+    if (reusedCount.value > 0) {
+      console.log(`[LargeDocs] Reused ${reusedCount.value}/${allChunkRecords.length} embeddings via content hash match`);
+    }
+
+    // Delete any old chunks that no longer exist (document may have shrunk)
+    const oldChunkIds = new Set(existingChunks.map((c) => c.id));
+    const newChunkIds = new Set(allChunkRecords.map((c) => c.id));
+    const staleChunkIds = [...oldChunkIds].filter((id) => !newChunkIds.has(id));
+
+    // Store all chunks (and remove stale ones)
     const tx = db.transaction("chunks", "readwrite");
     for (const record of allChunkRecords) {
       await tx.store.put(record);
+    }
+    for (const staleId of staleChunkIds) {
+      await tx.store.delete(staleId);
     }
     await tx.done;
 
@@ -616,12 +663,13 @@ function computeRRFScore(
  *
  * This is the core RAG search function that Claude will use.
  *
- * Pipeline:
- * 1. Run lexical search → ranked list
- * 2. Run semantic search → ranked list  
- * 3. Compute RRF fusion scores
- * 4. (Optional) Rerank top candidates with cross-encoder for better accuracy
- * 5. Return final results with matched terms
+ * Optimized pipeline (loads chunks per-document to bound memory):
+ * 1. Get list of ready documents
+ * 2. For each document, load its chunks via the by-document index
+ * 3. Run lexical + semantic search per document, collect all scored candidates
+ * 4. Compute global RRF fusion scores across all candidates
+ * 5. (Optional) Rerank top candidates with cross-encoder for better accuracy
+ * 6. Return final results with matched terms
  */
 export async function searchLargeDocuments(
   query: string,
@@ -646,40 +694,75 @@ export async function searchLargeDocuments(
 
   const db = await getLargeDocumentsDb();
 
-  // Get all chunks
-  const allChunks = await db.getAll("chunks");
-
-  if (allChunks.length === 0) {
-    return [];
-  }
-
-  // Get all document metadata for filename lookup
+  // Get all ready documents
   const allDocs = await db.getAll("documents");
+  const readyDocs = allDocs.filter((d) => d.status === "ready");
+  if (readyDocs.length === 0) return [];
+
   const docMap = new Map<string, LargeDocumentMetadata>();
-  for (const doc of allDocs) {
+  for (const doc of readyDocs) {
     docMap.set(doc.id, doc);
   }
 
   // Detect query type
   const queryType = detectQueryType(query);
 
-  // Run lexical search
-  const lexicalResults = largeDocLexicalSearch(query, allChunks);
-  const lexicalRanks = new Map<string, number>();
-  const lexicalScoresMap = new Map<string, LargeDocLexicalResult>();
-  lexicalResults.forEach((result, index) => {
-    lexicalRanks.set(result.chunk.id, index + 1); // 1-indexed rank
-    lexicalScoresMap.set(result.chunk.id, result);
-  });
-
-  // Embed the query
-  let queryEmbedding: number[];
+  // Embed the query upfront (needed for all documents)
+  let queryEmbedding: number[] | null = null;
   try {
     queryEmbedding = await embedQuery(query);
   } catch (error) {
-    console.error("[LargeDocs] Failed to embed query:", error);
-    // Fall back to lexical-only if embedding fails
-    return lexicalResults.slice(0, topK).map((r) => {
+    console.error("[LargeDocs] Failed to embed query, using lexical-only:", error);
+  }
+
+  // Collect scored candidates across all documents.
+  // We load chunks per-document via the by-document index to avoid loading
+  // the entire chunks store into memory at once.
+  type ScoredCandidate = {
+    chunk: LargeDocumentChunk;
+    semanticScore: number;
+    lexicalScore: number;
+    matchedTerms: string[];
+  };
+  const allCandidates: ScoredCandidate[] = [];
+
+  for (const doc of readyDocs) {
+    const chunks = await db.getAllFromIndex("chunks", "by-document", doc.id);
+    if (chunks.length === 0) continue;
+
+    // Lexical search for this document's chunks
+    const lexicalResults = largeDocLexicalSearch(query, chunks);
+    const lexicalScoresMap = new Map<string, LargeDocLexicalResult>();
+    for (const r of lexicalResults) {
+      lexicalScoresMap.set(r.chunk.id, r);
+    }
+
+    // Semantic scoring for this document's chunks
+    for (const chunk of chunks) {
+      const semanticScore = queryEmbedding
+        ? cosineSimilarity(queryEmbedding, chunk.embedding)
+        : 0;
+      const lexicalResult = lexicalScoresMap.get(chunk.id);
+
+      // Early filter: skip chunks below threshold that also have no lexical match.
+      // This avoids accumulating thousands of irrelevant candidates.
+      if (semanticScore < minThreshold && !lexicalResult) continue;
+
+      allCandidates.push({
+        chunk,
+        semanticScore,
+        lexicalScore: lexicalResult?.lexicalScore ?? 0,
+        matchedTerms: lexicalResult?.matchedTerms ?? [],
+      });
+    }
+  }
+
+  if (allCandidates.length === 0) return [];
+
+  // If we only have lexical results (embedding failed), sort by lexical score
+  if (!queryEmbedding) {
+    allCandidates.sort((a, b) => b.lexicalScore - a.lexicalScore);
+    return allCandidates.slice(0, topK).map((r) => {
       const doc = docMap.get(r.chunk.documentId);
       return {
         documentId: r.chunk.documentId,
@@ -694,68 +777,45 @@ export async function searchLargeDocuments(
     });
   }
 
-  // Compute semantic scores and create ranked list
-  const semanticScored: Array<{ chunk: LargeDocumentChunk; score: number }> = [];
-  for (const chunk of allChunks) {
-    const similarity = cosineSimilarity(queryEmbedding, chunk.embedding);
-    semanticScored.push({ chunk, score: similarity });
-  }
-
-  // Sort by semantic score to get ranks
-  semanticScored.sort((a, b) => b.score - a.score);
-
+  // Sort candidates by semantic score to assign semantic ranks
+  allCandidates.sort((a, b) => b.semanticScore - a.semanticScore);
   const semanticRanks = new Map<string, number>();
-  const rawSemanticScores = new Map<string, number>();
-  semanticScored.forEach((item, index) => {
-    semanticRanks.set(item.chunk.id, index + 1); // 1-indexed rank
-    rawSemanticScores.set(item.chunk.id, item.score);
+  allCandidates.forEach((item, index) => {
+    semanticRanks.set(item.chunk.id, index + 1);
   });
 
-  // Combine using RRF
-  const combinedResults: Array<{
-    chunk: LargeDocumentChunk;
-    rrfScore: number;
-    semanticScore: number;
-    lexicalScore: number;
-    matchedTerms: string[];
-  }> = [];
+  // Sort candidates by lexical score to assign lexical ranks (only those with a score)
+  const lexicalCandidates = allCandidates
+    .filter((c) => c.lexicalScore > 0)
+    .sort((a, b) => b.lexicalScore - a.lexicalScore);
+  const lexicalRanks = new Map<string, number>();
+  lexicalCandidates.forEach((item, index) => {
+    lexicalRanks.set(item.chunk.id, index + 1);
+  });
 
-  for (const chunk of allChunks) {
-    const id = chunk.id;
-    const semanticRank = semanticRanks.get(id) ?? null;
-    const lexicalRank = lexicalRanks.get(id) ?? null;
-    const semanticScore = rawSemanticScores.get(id) ?? 0;
-    const lexicalResult = lexicalScoresMap.get(id);
-    const lexicalScore = lexicalResult?.lexicalScore ?? 0;
-    const matchedTerms = lexicalResult?.matchedTerms ?? [];
-
-    const rrfScore = computeRRFScore(semanticRank, lexicalRank, rrfK);
-
-    combinedResults.push({
-      chunk,
-      rrfScore,
-      semanticScore,
-      lexicalScore,
-      matchedTerms,
-    });
-  }
+  // Compute RRF scores
+  const rrfScored = allCandidates.map((c) => ({
+    ...c,
+    rrfScore: computeRRFScore(
+      semanticRanks.get(c.chunk.id) ?? null,
+      lexicalRanks.get(c.chunk.id) ?? null,
+      rrfK
+    ),
+  }));
 
   // Sort by RRF score
-  combinedResults.sort((a, b) => b.rrfScore - a.rrfScore);
+  rrfScored.sort((a, b) => b.rrfScore - a.rrfScore);
 
   // Determine if we should rerank
   const shouldRerank = enableRerank ?? (getRecommendedReranker() !== "none");
   const candidateCount = shouldRerank ? retrieveK : topK;
 
-  // Get candidates
-  const candidates = combinedResults.slice(0, candidateCount);
+  // Get candidates and filter by semantic threshold
+  const filtered = rrfScored
+    .slice(0, candidateCount)
+    .filter((r) => r.semanticScore >= minThreshold);
 
-  // Filter by semantic threshold
-  const filtered = candidates.filter((r) => r.semanticScore >= minThreshold);
-
-  if (filtered.length === 0) {
-    return [];
-  }
+  if (filtered.length === 0) return [];
 
   // Apply reranking if enabled
   if (shouldRerank && filtered.length > 1) {
@@ -779,7 +839,6 @@ export async function searchLargeDocuments(
         topK,
       });
 
-      // Build results from reranked list
       return reranked.map((r) => {
         const meta = r.metadata as {
           documentId: string;
@@ -804,14 +863,11 @@ export async function searchLargeDocuments(
       });
     } catch (error) {
       console.error("[LargeDocs] Reranking failed, falling back to RRF scores:", error);
-      // Fall through to non-reranked results
     }
   }
 
   // Return results without reranking (take topK)
-  const finalResults = filtered.slice(0, topK);
-
-  return finalResults.map((r) => {
+  return filtered.slice(0, topK).map((r) => {
     const doc = docMap.get(r.chunk.documentId);
     return {
       documentId: r.chunk.documentId,
