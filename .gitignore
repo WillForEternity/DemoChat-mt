@@ -28,3 +28,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .next-dev/
+
+# misc
+11.7.0
+pnpm-lock 2.yaml
+test-icons.js
