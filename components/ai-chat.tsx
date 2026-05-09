@@ -3708,14 +3708,18 @@ export default function Chat({
                       await kb.readFile(args.path as string);
                       break;
                     case "kb_write":
-                      await kb.writeFile(args.path as string, args.content as string);
+                      await kb.writeFile(args.path as string, args.content as string, { source: "agent" });
                       refreshRootFolders();
                       break;
                     case "kb_append":
-                      await kb.appendFile(args.path as string, args.content as string);
+                      await kb.appendFile(args.path as string, args.content as string, { source: "agent" });
                       break;
                     case "kb_mkdir":
-                      await kb.mkdir(args.path as string);
+                      await kb.mkdir(args.path as string, { source: "agent" });
+                      refreshRootFolders();
+                      break;
+                    case "kb_rename":
+                      await kb.renameNode(args.path as string, args.newName as string, { source: "agent" });
                       refreshRootFolders();
                       break;
                   }
@@ -3742,14 +3746,18 @@ export default function Chat({
                       await kb.readFile(args.path as string);
                       break;
                     case "kb_write":
-                      await kb.writeFile(args.path as string, args.content as string);
+                      await kb.writeFile(args.path as string, args.content as string, { source: "agent" });
                       refreshRootFolders();
                       break;
                     case "kb_append":
-                      await kb.appendFile(args.path as string, args.content as string);
+                      await kb.appendFile(args.path as string, args.content as string, { source: "agent" });
                       break;
                     case "kb_mkdir":
-                      await kb.mkdir(args.path as string);
+                      await kb.mkdir(args.path as string, { source: "agent" });
+                      refreshRootFolders();
+                      break;
+                    case "kb_rename":
+                      await kb.renameNode(args.path as string, args.newName as string, { source: "agent" });
                       refreshRootFolders();
                       break;
                   }
@@ -3858,26 +3866,36 @@ ${content}
             break;
           }
           case "kb_write": {
-            await kb.writeFile(args.path as string, args.content as string);
+            await kb.writeFile(args.path as string, args.content as string, { source: "agent" });
             refreshRootFolders();
             output = { success: true };
             break;
           }
           case "kb_append": {
-            await kb.appendFile(args.path as string, args.content as string);
+            await kb.appendFile(args.path as string, args.content as string, { source: "agent" });
             output = { success: true };
             break;
           }
           case "kb_mkdir": {
-            await kb.mkdir(args.path as string);
+            await kb.mkdir(args.path as string, { source: "agent" });
             refreshRootFolders();
             output = { success: true };
             break;
           }
           case "kb_delete": {
-            await kb.deleteNode(args.path as string);
+            await kb.deleteNode(args.path as string, { source: "agent" });
             refreshRootFolders();
             output = { success: true };
+            break;
+          }
+          case "kb_rename": {
+            const newPath = await kb.renameNode(
+              args.path as string,
+              args.newName as string,
+              { source: "agent" }
+            );
+            refreshRootFolders();
+            output = { success: true, newPath };
             break;
           }
           case "kb_search": {
@@ -4910,6 +4928,7 @@ ${n.links.incoming.length > 0 ? `<incoming>${n.links.incoming.map((l) => `<link 
       "kb_append",
       "kb_mkdir",
       "kb_delete",
+      "kb_rename",
       "kb_search",
     ];
 
@@ -5386,68 +5405,6 @@ ${n.links.incoming.length > 0 ? `<incoming>${n.links.incoming.map((l) => `<link 
         <div 
           className="bg-white dark:bg-neutral-950 rounded-3xl border border-gray-200 dark:border-neutral-800 shadow-lg p-5 flex flex-col flex-1 min-h-0"
         >
-          {/* Context Dialog - shows above textarea when active */}
-          {showContextDialog && (
-            <div className="mb-3 p-4 bg-gradient-to-br from-gray-50/80 to-white dark:from-neutral-900 dark:to-neutral-850 rounded-2xl border border-gray-200/80 dark:border-neutral-700/50 shadow-sm backdrop-blur-sm">
-              <div className="flex items-center justify-between mb-4">
-                <span className="text-sm font-medium text-gray-700 dark:text-neutral-300">Add Context</span>
-                <button
-                  type="button"
-                  onClick={() => setShowContextDialog(false)}
-                  className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-neutral-300 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-all"
-                >
-                  <IoClose className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="space-y-3">
-                {/* Upload buttons row */}
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleAttachment}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-white dark:bg-neutral-800 border border-gray-200 dark:border-neutral-700 rounded-xl text-sm font-medium text-gray-700 dark:text-neutral-300 hover:bg-gray-50 dark:hover:bg-neutral-750 hover:border-gray-300 dark:hover:border-neutral-600 transition-all shadow-sm"
-                  >
-                    <IoDocumentText className="w-4 h-4 text-emerald-500" />
-                    <span>Documents</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleImageUpload}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-white dark:bg-neutral-800 border border-gray-200 dark:border-neutral-700 rounded-xl text-sm font-medium text-gray-700 dark:text-neutral-300 hover:bg-gray-50 dark:hover:bg-neutral-750 hover:border-gray-300 dark:hover:border-neutral-600 transition-all shadow-sm"
-                  >
-                    <IoImage className="w-4 h-4 text-emerald-500" />
-                    <span>Images</span>
-                  </button>
-                </div>
-
-                {/* Divider with "or" */}
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 h-px bg-gray-200 dark:bg-neutral-700" />
-                  <span className="text-xs text-gray-400 dark:text-neutral-500">or paste text</span>
-                  <div className="flex-1 h-px bg-gray-200 dark:bg-neutral-700" />
-                </div>
-
-                <Textarea
-                  placeholder="Paste content here and press Enter..."
-                  className="min-h-[80px] resize-none text-sm bg-white dark:bg-neutral-800 border-gray-200 dark:border-neutral-700 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-500 transition-all"
-                  onChange={(e) => {
-                    const content = e.target.value;
-                    if (content.trim()) {
-                      const words = content.split(/\s+/).length;
-                      if (words > 100000) {
-                        alert("Content exceeds 100,000 words limit");
-                        return;
-                      }
-                      setPastedContent(content);
-                      e.target.value = "";
-                    }
-                  }}
-                />
-              </div>
-            </div>
-          )}
-
           {/* Attached Files & Images Display */}
           {(attachedFiles.length > 0 || attachedImages.length > 0 || pastedContent) && (
             <div className="mb-3 flex flex-wrap gap-2">
@@ -5716,24 +5673,75 @@ ${n.links.incoming.length > 0 ? `<incoming>${n.links.incoming.map((l) => `<link 
               <div className="w-px h-4 bg-gray-200 dark:bg-neutral-700 mx-1" />
 
               {/* Add Context Button */}
-              <button
-                type="button"
-                onClick={() => setShowContextDialog(!showContextDialog)}
-                className={cn(
-                  "inline-flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-xl transition-all duration-200",
-                  showContextDialog || attachedFiles.length > 0 || attachedImages.length > 0 || pastedContent
-                    ? "bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-800/50 shadow-sm"
-                    : "text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-300 hover:bg-gray-100/80 dark:hover:bg-neutral-800/80"
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowContextDialog(!showContextDialog)}
+                  className={cn(
+                    "inline-flex items-center gap-2 text-sm font-medium px-3 py-1.5 rounded-xl transition-all duration-200",
+                    showContextDialog || attachedFiles.length > 0 || attachedImages.length > 0 || pastedContent
+                      ? "bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-800/50 shadow-sm"
+                      : "text-gray-500 dark:text-neutral-400 hover:text-gray-700 dark:hover:text-neutral-300 hover:bg-gray-100/80 dark:hover:bg-neutral-800/80"
+                  )}
+                  title="Add files, images, or paste content"
+                >
+                  <IoAdd className="w-4 h-4" />
+                  <span className="hidden sm:inline">
+                    {attachedFiles.length > 0 || attachedImages.length > 0 || pastedContent
+                      ? `${attachedFiles.length + attachedImages.length + (pastedContent ? 1 : 0)} item${(attachedFiles.length + attachedImages.length + (pastedContent ? 1 : 0)) !== 1 ? 's' : ''}`
+                      : "Context"}
+                  </span>
+                </button>
+
+                {showContextDialog && (
+                  <div className="absolute left-0 bottom-full mb-2 w-64 bg-white dark:bg-neutral-800 rounded-xl border border-gray-200 dark:border-neutral-700 shadow-lg p-1 z-10">
+                    <div className="px-3 py-2 text-sm font-medium text-gray-500 dark:text-neutral-500 border-b border-gray-100 dark:border-neutral-700">
+                      Add Context
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleAttachment();
+                        setShowContextDialog(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-neutral-700 rounded-lg transition-colors"
+                    >
+                      <IoDocumentText className="w-4 h-4 text-emerald-500" />
+                      <span className="text-gray-900 dark:text-neutral-300 text-sm font-medium">Documents</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleImageUpload();
+                        setShowContextDialog(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-neutral-700 rounded-lg transition-colors"
+                    >
+                      <IoImage className="w-4 h-4 text-emerald-500" />
+                      <span className="text-gray-900 dark:text-neutral-300 text-sm font-medium">Images</span>
+                    </button>
+                    <div className="px-2 pt-2 pb-1">
+                      <Textarea
+                        placeholder="Or paste text…"
+                        className="min-h-[60px] resize-none text-sm bg-gray-50 dark:bg-neutral-900 border-gray-200 dark:border-neutral-700 rounded-lg focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-500 transition-all"
+                        onChange={(e) => {
+                          const content = e.target.value;
+                          if (content.trim()) {
+                            const words = content.split(/\s+/).length;
+                            if (words > 100000) {
+                              alert("Content exceeds 100,000 words limit");
+                              return;
+                            }
+                            setPastedContent(content);
+                            e.target.value = "";
+                            setShowContextDialog(false);
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
                 )}
-                title="Add files, images, or paste content"
-              >
-                <IoAdd className="w-4 h-4" />
-                <span className="hidden sm:inline">
-                  {attachedFiles.length > 0 || attachedImages.length > 0 || pastedContent
-                    ? `${attachedFiles.length + attachedImages.length + (pastedContent ? 1 : 0)} item${(attachedFiles.length + attachedImages.length + (pastedContent ? 1 : 0)) !== 1 ? 's' : ''}`
-                    : "Context"}
-                </span>
-              </button>
+              </div>
             </div>
 
             <div className="flex items-center gap-2">

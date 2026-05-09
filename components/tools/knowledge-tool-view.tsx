@@ -116,6 +116,12 @@ const toolConfig: Record<
     label: "Deleting",
     verb: "Deleted",
   },
+  kb_rename: {
+    icon: IoCreate,
+    color: "text-gray-500 dark:text-neutral-400",
+    label: "Renaming",
+    verb: "Renamed",
+  },
   kb_search: {
     icon: IoSearch,
     color: "text-gray-500 dark:text-neutral-400",
@@ -512,7 +518,7 @@ function WriteResult({
   action,
 }: {
   path: string;
-  action: "write" | "append" | "mkdir" | "delete";
+  action: "write" | "append" | "mkdir" | "delete" | "rename";
 }) {
   const fileName = path.split("/").pop() || path;
 
@@ -539,6 +545,12 @@ function WriteResult({
       icon: IoTrash,
       color: "text-gray-500 dark:text-neutral-400",
       label: "Deleted",
+      bg: "from-gray-50 to-gray-100 dark:from-neutral-800/50 dark:to-neutral-800/30",
+    },
+    rename: {
+      icon: IoCreate,
+      color: "text-gray-500 dark:text-neutral-400",
+      label: "Renamed",
       bg: "from-gray-50 to-gray-100 dark:from-neutral-800/50 dark:to-neutral-800/30",
     },
   };
@@ -638,6 +650,11 @@ export function KnowledgeToolView({
 
       case "kb_delete":
         return <WriteResult path={path} action="delete" />;
+
+      case "kb_rename": {
+        const newPath = (output.newPath as string) || path;
+        return <WriteResult path={newPath} action="rename" />;
+      }
 
       case "kb_search":
         return (

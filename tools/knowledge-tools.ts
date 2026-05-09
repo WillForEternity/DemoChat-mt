@@ -66,6 +66,18 @@ export const kbDeleteTool = tool({
   }),
 });
 
+export const kbRenameTool = tool({
+  description:
+    "Rename a file or folder in the knowledge base (within its current parent). " +
+    "For folders, child paths are rewritten recursively. Embeddings are migrated to the new path.",
+  inputSchema: z.object({
+    path: z.string().describe("Existing path to rename, e.g. 'projects/old-name.md'"),
+    newName: z
+      .string()
+      .describe("New name (no slashes), e.g. 'new-name.md' or 'archive'"),
+  }),
+});
+
 export const kbSearchTool = tool({
   description: `Hybrid search the KNOWLEDGE BASE using both lexical (exact terms) and semantic (meaning) matching.
 Returns relevant chunks ranked by combined score (0-1).
@@ -227,6 +239,7 @@ export const knowledgeTools = {
   kb_append: kbAppendTool,
   kb_mkdir: kbMkdirTool,
   kb_delete: kbDeleteTool,
+  kb_rename: kbRenameTool,
   kb_search: kbSearchTool,
   chat_search: chatSearchTool,
   kb_link: kbLinkTool,

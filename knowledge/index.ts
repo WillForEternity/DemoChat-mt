@@ -26,6 +26,12 @@
 export * from "./types";
 export * from "./operations";
 export * from "./kb-summary";
+export {
+  subscribeKnowledge,
+  emitKnowledgeEvent,
+  type KnowledgeEvent,
+  type KnowledgeEventType,
+} from "./events";
 export { 
   getKnowledgeDb, 
   initRootIfNeeded, 

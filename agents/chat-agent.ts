@@ -266,6 +266,7 @@ User: "What do I know about authentication?"
 - \`kb_list(path)\` - List folder contents. Returns XML-formatted folder listing.
 - \`kb_mkdir(path)\` - Create a folder.
 - \`kb_delete(path)\` - Delete a file or folder.
+- \`kb_rename(path, newName)\` - Rename a file or folder in place (within its parent). Use when reorganizing or fixing typos.
 
 **Quote-Grounding Pattern (IMPORTANT - improves accuracy):**
 When answering questions using retrieved files:

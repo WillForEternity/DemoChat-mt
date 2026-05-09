@@ -107,7 +107,7 @@ ${result.files.map((f) => `<file name="${f.name}" size="${f.size}" modified="${f
             }
             const path = args.path as string;
             const content = args.content as string;
-            await kb.writeFile(path, content);
+            await kb.writeFile(path, content, { source: "agent" });
             output = { success: true, path };
             onKBFoldersChange?.();
             break;
@@ -119,7 +119,7 @@ ${result.files.map((f) => `<file name="${f.name}" size="${f.size}" modified="${f
             }
             const path = args.path as string;
             const content = args.content as string;
-            await kb.appendFile(path, content);
+            await kb.appendFile(path, content, { source: "agent" });
             output = { success: true, path };
             break;
           }
@@ -129,7 +129,7 @@ ${result.files.map((f) => `<file name="${f.name}" size="${f.size}" modified="${f
               break;
             }
             const path = args.path as string;
-            await kb.mkdir(path);
+            await kb.mkdir(path, { source: "agent" });
             output = { success: true, path };
             onKBFoldersChange?.();
             break;
@@ -140,8 +140,20 @@ ${result.files.map((f) => `<file name="${f.name}" size="${f.size}" modified="${f
               break;
             }
             const path = args.path as string;
-            await kb.deleteNode(path);
+            await kb.deleteNode(path, { source: "agent" });
             output = { success: true, path };
+            onKBFoldersChange?.();
+            break;
+          }
+          case "kb_rename": {
+            if (!enabledTools.includes("kb")) {
+              output = { error: "Knowledge base tools not enabled" };
+              break;
+            }
+            const path = args.path as string;
+            const newName = args.newName as string;
+            const newPath = await kb.renameNode(path, newName, { source: "agent" });
+            output = { success: true, newPath };
             onKBFoldersChange?.();
             break;
           }
