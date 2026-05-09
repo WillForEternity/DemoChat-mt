@@ -23,6 +23,8 @@ import {
   type OrchestratorState,
 } from "@/components/tools/agent-orchestrator-view";
 
+export type { OrchestratorState };
+
 // =============================================================================
 // TYPES
 // =============================================================================

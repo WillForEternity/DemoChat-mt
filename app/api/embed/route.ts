@@ -47,12 +47,34 @@ export async function POST(req: Request) {
       openaiApiKey: userKey,
       model: requestedModel,
       dimensions: requestedDimensions,
+      useFreeTrial,
     } = await req.json();
 
     if (!texts || !Array.isArray(texts) || texts.length === 0) {
       return Response.json(
         { error: "texts array is required and must not be empty" },
         { status: 400 }
+      );
+    }
+
+    // OpenAI embedding inputs cap at 8192 tokens. Defense-in-depth: hard-cap
+    // each input by character length (~4 chars/token => 28000 chars ≈ 7000
+    // tokens) so an oversized chunk slipping past the chunker can't 500 the
+    // entire batch. Upstream callers should be splitting before this, but
+    // we'd rather embed a truncated tail than lose the whole request.
+    const MAX_EMBED_CHARS = 28000;
+    let truncatedCount = 0;
+    const safeTexts: string[] = (texts as unknown[]).map((t) => {
+      const s = typeof t === "string" ? t : String(t ?? "");
+      if (s.length > MAX_EMBED_CHARS) {
+        truncatedCount++;
+        return s.slice(0, MAX_EMBED_CHARS);
+      }
+      return s;
+    });
+    if (truncatedCount > 0) {
+      console.warn(
+        `[Embed API] Truncated ${truncatedCount}/${safeTexts.length} input(s) to ${MAX_EMBED_CHARS} chars to stay under the 8192-token embedding limit`,
       );
     }
 
@@ -73,7 +95,7 @@ export async function POST(req: Request) {
     const { isOwner } = await getAuthContext();
 
     // Resolve which API key to use
-    const apiKey = resolveApiKey(isOwner, userKey, process.env.OPENAI_API_KEY);
+    const apiKey = resolveApiKey(isOwner, userKey, process.env.OPENAI_API_KEY, !!useFreeTrial);
 
     if (!apiKey) {
       return createApiKeyRequiredResponse();
@@ -93,7 +115,7 @@ export async function POST(req: Request) {
       // Single query embedding
       const { embedding } = await embed({
         model: embeddingModel,
-        value: texts[0],
+        value: safeTexts[0],
       });
       return Response.json({
         embedding,
@@ -105,7 +127,7 @@ export async function POST(req: Request) {
     // Batch embedding for document chunks
     const { embeddings } = await embedMany({
       model: embeddingModel,
-      values: texts,
+      values: safeTexts,
     });
     return Response.json({
       embeddings,

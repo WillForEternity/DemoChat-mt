@@ -7,6 +7,22 @@
  */
 
 /**
+ * Document lifecycle status. Reflects ground truth, not UI optimism.
+ *
+ * - `stored`     File is on disk; indexing has not started yet.
+ * - `extracting` Per-page extraction is running (pdf.js + AI fallback).
+ * - `embedding`  Chunking + embedding the extracted text.
+ * - `ready`      Searchable.
+ * - `error`      Indexing failed or was interrupted.
+ */
+export type LargeDocumentStatus =
+  | "stored"
+  | "extracting"
+  | "embedding"
+  | "ready"
+  | "error";
+
+/**
  * Metadata about an uploaded large document.
  * Stored in IndexedDB for reference.
  */
@@ -27,14 +43,17 @@ export interface LargeDocumentMetadata {
   indexedAt: number;
   /** Optional user-provided description */
   description?: string;
-  /** Document status */
-  status: "uploading" | "indexing" | "ready" | "error";
+  /** Document lifecycle status */
+  status: LargeDocumentStatus;
   /** Error message if status is 'error' */
   errorMessage?: string;
 }
 
 /**
  * A chunk of content from a large document, with embedding.
+ *
+ * `pageStart` / `pageEnd` are required (v2 schema). For non-paged sources
+ * (plain text, markdown), they are set to 1.
  */
 export interface LargeDocumentChunk {
   /** Unique chunk ID: `${documentId}#${chunkIndex}` */
@@ -53,6 +72,16 @@ export interface LargeDocumentChunk {
   embedding: number[];
   /** When this chunk was created/updated */
   updatedAt: number;
+  /**
+   * 1-based page where this chunk's first character lives.
+   * Required (v2). Non-paged sources use 1.
+   */
+  pageStart: number;
+  /**
+   * 1-based page of last character of this chunk.
+   * Differs from pageStart only when ≥30% of chunk chars come from a later page.
+   */
+  pageEnd: number;
 }
 
 /**
@@ -71,6 +100,10 @@ export interface LargeDocumentSearchResult {
   score: number;
   /** Chunk index for reference */
   chunkIndex: number;
+  /** First page (1-based) for citation/jump-to-page */
+  pageStart: number;
+  /** Last page (1-based) for citation */
+  pageEnd: number;
   /** Whether this result was reranked by a cross-encoder */
   reranked?: boolean;
   /** Terms that matched in lexical search (if includeBreakdown enabled) */
@@ -81,6 +114,10 @@ export interface LargeDocumentSearchResult {
 
 /**
  * Progress callback for document indexing.
+ *
+ * Optional fields are populated during page-level extraction so the UI
+ * can show "Extracting 17 of 40 pages (AI: 3 / 5)" instead of a silent
+ * spinner.
  */
 export interface IndexingProgress {
   /** Current step (0-based) */
@@ -88,9 +125,26 @@ export interface IndexingProgress {
   /** Total steps */
   total: number;
   /** Current status */
-  status: "parsing" | "pdf-extraction" | "ai-extraction" | "chunking" | "embedding" | "complete" | "error";
+  status:
+    | "parsing"
+    | "pdf-extraction"
+    | "ai-extraction"
+    | "chunking"
+    | "embedding"
+    | "complete"
+    | "error";
   /** Status message */
   message: string;
+  /** Pages processed so far (extraction phase) */
+  pagesProcessed?: number;
+  /** Total pages in the document */
+  pagesTotal?: number;
+  /** Source for the most recent page extracted */
+  currentSource?: "pdfjs" | "ai";
+  /** AI sub-ranges completed / total (if any) */
+  aiRangesDone?: number;
+  /** AI sub-ranges total */
+  aiRangesTotal?: number;
 }
 
 /**
@@ -103,4 +157,26 @@ export interface LargeDocumentFile {
   data: ArrayBuffer;
   /** MIME type */
   mimeType: string;
+}
+
+/**
+ * One row in the per-page extraction cache (v2 schema).
+ *
+ * Compound key: `[documentId, pageIndex, source]`.
+ * Lets Phase 6 "Retry indexing" resume cheaply: pages already extracted
+ * (whether by pdf.js or by the AI fallback) are skipped on the next run.
+ */
+export interface ExtractionCacheEntry {
+  /** Reference to parent document */
+  documentId: string;
+  /** 0-based page index within the document */
+  pageIndex: number;
+  /** Which extractor produced this text */
+  source: "pdfjs" | "ai";
+  /** Extracted text for this single page */
+  text: string;
+  /** SHA-256 hash of the source PDF file (for invalidation on re-upload) */
+  fileHash: string;
+  /** When this entry was written */
+  createdAt: number;
 }

@@ -97,10 +97,10 @@ export function ChatMessage({
           "relative rounded-2xl",
           message.role === "user"
             ? compact
-              ? "max-w-[90%] px-3 py-2 bg-primary/10 text-gray-900 dark:text-neutral-300"
+              ? "max-w-[90%] px-3 py-2 neu-outset text-gray-900 dark:text-neutral-300"
               : "max-w-[80%] px-4 py-2 neu-outset text-gray-900 dark:text-neutral-300"
             : compact
-              ? "max-w-[90%] px-3 py-2 bg-muted text-gray-900 dark:text-neutral-500"
+              ? "max-w-[90%] px-3 py-2 bg-transparent text-gray-900 dark:text-neutral-500"
               : "max-w-[80%] px-4 py-2 bg-transparent text-gray-900 dark:text-neutral-500"
         )}
       >

@@ -11,7 +11,7 @@
  * for the duration of the page session, so re-opening the same document is instant.
  */
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/esm/Page/TextLayer.css";
 import "react-pdf/dist/esm/Page/AnnotationLayer.css";
@@ -98,9 +98,16 @@ interface PDFViewerProps {
   documentId?: string;
   /** Direct file data for immediate rendering without IDB lookup */
   directFileData?: ArrayBuffer;
+  /** Callback to send selection to a NEW chat tab */
   onSelection: (selection: SelectionData) => void;
+  /** Callback to send selection to the ACTIVE (current) chat tab */
+  onSelectionToActiveChat?: (selection: SelectionData) => void;
+  /** Whether there is an active chat to send to */
+  hasActiveChat?: boolean;
   /** Callback when selection state changes (for coordinating Escape key handling) */
   onSelectionStateChange?: (hasSelection: boolean) => void;
+  /** Optional 1-based page to scroll to once the PDF finishes loading. */
+  initialPage?: number;
 }
 
 // =============================================================================
@@ -140,10 +147,37 @@ interface SelectionRect {
   page: number;
 }
 
-export function PDFViewer({ documentId, directFileData, onSelection, onSelectionStateChange }: PDFViewerProps) {
-  // Store file data as Uint8Array to avoid ArrayBuffer detachment issues
-  const [fileData, setFileData] = useState<Uint8Array | null>(() => 
-    directFileData ? new Uint8Array(directFileData) : null
+/**
+ * Copy a `Uint8Array | ArrayBuffer` into a freshly allocated `Uint8Array`
+ * whose `ArrayBuffer` is owned exclusively by this component. We need this
+ * because callers (`directFileData`, `pdfCache`, `getCachedPDF`) often hand
+ * us a view that shares its buffer with state owned elsewhere — if anything
+ * in the app (including pdf.js's worker `postMessage`) transfers that
+ * shared buffer, every view over it becomes detached and any subsequent
+ * read throws `Underlying ArrayBuffer has been detached from the view`.
+ */
+function ownBytes(src: Uint8Array | ArrayBuffer): Uint8Array {
+  const view = src instanceof Uint8Array ? src : new Uint8Array(src);
+  const out = new Uint8Array(view.byteLength);
+  out.set(view);
+  return out;
+}
+
+function isDetached(arr: Uint8Array): boolean {
+  // A detached typed array reports byteLength === 0 even when it was
+  // previously non-empty. Touching the underlying buffer also throws.
+  try {
+    return arr.byteLength === 0 && arr.buffer.byteLength === 0;
+  } catch {
+    return true;
+  }
+}
+
+export function PDFViewer({ documentId, directFileData, onSelection, onSelectionToActiveChat, hasActiveChat, onSelectionStateChange, initialPage }: PDFViewerProps) {
+  // Store file data as a Uint8Array we own outright (private ArrayBuffer) so
+  // detachments by external code paths don't surface here.
+  const [fileData, setFileData] = useState<Uint8Array | null>(() =>
+    directFileData ? ownBytes(directFileData) : null,
   );
   const [isLoading, setIsLoading] = useState(!directFileData);
   const [error, setError] = useState<string | null>(null);
@@ -176,8 +210,23 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   // Selection hint banner dismissed state
   const [hintDismissed, setHintDismissed] = useState(false);
 
-  // Flag to suppress observer-driven page changes during zoom
+  // Flag to suppress observer-driven page changes during zoom or container resize
   const isZoomingRef = useRef(false);
+  const isResizingRef = useRef(false);
+  const resizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Suppress observer during programmatic scrolls (scrollToPage smooth animation,
+  // anchor restoration). Without this, the observer fires for transit pages and
+  // commits a setVisiblePage after the debounce, which slides the window mid-animation
+  // and dumps the user on a different page than they navigated to.
+  const isProgrammaticScrollRef = useRef(false);
+  const programmaticScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Anchor used to keep the user's visual position stable when the sliding
+  // window mounts/unmounts pages around the viewport. Captured before the
+  // renderedPages state change commits; consumed by a layout effect afterwards
+  // to compensate scrollTop for any height delta.
+  const anchorRef = useRef<{ page: number; offset: number } | null>(null);
 
   // Notify parent about selection state changes
   useEffect(() => {
@@ -192,7 +241,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   useEffect(() => {
     if (directFileData) {
       loadedDocumentIdRef.current = null; // Clear ref since we're using direct data
-      setFileData(new Uint8Array(directFileData));
+      setFileData(ownBytes(directFileData));
       setIsLoading(false);
       setError(null);
       setLoadedPages(new Set([1]));
@@ -214,9 +263,9 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     // Check if we might have it cached (instant check)
     const cached = pdfCache.get(documentId);
     if (cached) {
-      // Instant load from cache - return a copy to avoid detachment
+      // Instant load from cache - own the bytes locally to avoid detachment
       loadedDocumentIdRef.current = documentId;
-      setFileData(new Uint8Array(cached.data));
+      setFileData(ownBytes(cached.data));
       setIsLoading(false);
       setError(null);
       return;
@@ -234,7 +283,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
         if (cancelled) return;
         if (data) {
           loadedDocumentIdRef.current = documentId;
-          setFileData(data);
+          setFileData(ownBytes(data));
         } else {
           setError("PDF file not found in storage. The document may still be uploading.");
         }
@@ -261,9 +310,21 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   
   useEffect(() => {
     if (numPages === 0) return;
-    
+
     const target = getWindowPages(visiblePage, numPages);
-    
+
+    // Capture the visible page's screen offset BEFORE we commit the new window.
+    // The DOM still reflects the previous renderedPages at this point, so this
+    // measures where the user is currently looking. The layout effect below
+    // restores this offset after the new pages mount/unmount.
+    const container = containerRef.current;
+    const visibleEl = pageRefs.current.get(visiblePage);
+    if (container && visibleEl) {
+      const cRect = container.getBoundingClientRect();
+      const pRect = visibleEl.getBoundingClientRect();
+      anchorRef.current = { page: visiblePage, offset: pRect.top - cRect.top };
+    }
+
     setRenderedPages(prev => {
       // Quick equality check: same size and all target pages already present
       if (target.size === prev.size) {
@@ -271,11 +332,46 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
         for (const p of target) {
           if (!prev.has(p)) { same = false; break; }
         }
-        if (same) return prev; // No change — bail out to avoid re-render
+        if (same) {
+          anchorRef.current = null; // No DOM change → no anchor to restore
+          return prev;
+        }
       }
       return target;
     });
   }, [visiblePage, numPages]);
+
+  // Restore the captured anchor immediately after the sliding window commits,
+  // BEFORE the browser paints. This eliminates the scroll-jump that otherwise
+  // throws the user hundreds of pages away when placeholder vs. actual page
+  // heights differ.
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current;
+    if (!anchor) return;
+    anchorRef.current = null;
+
+    const container = containerRef.current;
+    const el = pageRefs.current.get(anchor.page);
+    if (!container || !el) return;
+
+    const cRect = container.getBoundingClientRect();
+    const pRect = el.getBoundingClientRect();
+    const newOffset = pRect.top - cRect.top;
+    const delta = newOffset - anchor.offset;
+
+    if (Math.abs(delta) > 0.5) {
+      // Suppress observer briefly so the corrective scroll doesn't trigger
+      // another visiblePage update and feedback loop.
+      isProgrammaticScrollRef.current = true;
+      container.scrollTop += delta;
+      if (programmaticScrollTimeoutRef.current) {
+        clearTimeout(programmaticScrollTimeoutRef.current);
+      }
+      programmaticScrollTimeoutRef.current = setTimeout(() => {
+        isProgrammaticScrollRef.current = false;
+      }, 100);
+    }
+  }, [renderedPages]);
   
   // Convert to sorted array for rendering (used in JSX map)
   const pagesToRender = useMemo(() => {
@@ -298,9 +394,11 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
 
     observerRef.current = new IntersectionObserver(
       (entries) => {
-        // Skip observer updates while a zoom operation is in progress.
-        // The zoom handler will restore the correct scroll position.
-        if (isZoomingRef.current) return;
+        // Skip observer updates while a zoom or container resize is in progress.
+        // During zoom, the handler restores the correct scroll position.
+        // During resize (e.g. panel drag), intersection ratios are transient
+        // and can trigger a feedback loop of page mount/unmount → scroll shift → observer fire.
+        if (isZoomingRef.current || isResizingRef.current || isProgrammaticScrollRef.current) return;
 
         // Find the most visible page
         let maxRatio = 0;
@@ -339,8 +437,39 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     return () => {
       observerRef.current?.disconnect();
       if (scrollDebounceRef.current) clearTimeout(scrollDebounceRef.current);
+      if (programmaticScrollTimeoutRef.current) clearTimeout(programmaticScrollTimeoutRef.current);
     };
   }, [numPages]); // Only recreate when numPages changes (new document loaded)
+
+  // Suppress IntersectionObserver during container resizes (e.g. panel drag).
+  // When the container width/height changes, the observer fires with stale
+  // intersection ratios which can detect a different "most visible page",
+  // triggering a sliding-window shift that mounts/unmounts pages, changing
+  // scroll height, causing more scroll events — an infinite feedback loop.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const ro = new ResizeObserver(() => {
+      // Mark as resizing — the IntersectionObserver callback will skip updates
+      isResizingRef.current = true;
+
+      // Clear any previous debounce
+      if (resizeDebounceRef.current) clearTimeout(resizeDebounceRef.current);
+
+      // After resize settles, re-enable observer updates
+      resizeDebounceRef.current = setTimeout(() => {
+        isResizingRef.current = false;
+      }, 300);
+    });
+
+    ro.observe(container);
+
+    return () => {
+      ro.disconnect();
+      if (resizeDebounceRef.current) clearTimeout(resizeDebounceRef.current);
+    };
+  }, []);
 
   // Register page elements with the observer
   const registerPageRef = useCallback((pageNum: number, element: HTMLDivElement | null) => {
@@ -439,7 +568,8 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   }, []);
 
   // Capture screenshot of selection
-  const captureSelection = useCallback(async () => {
+  // target: "new" sends to a new chat tab, "active" sends to the current active chat
+  const captureSelection = useCallback(async (target: "new" | "active" = "new") => {
     if (!pendingSelection) return;
 
     const pageElement = pageRefs.current.get(pendingSelection.page);
@@ -528,11 +658,17 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
         screenshot = canvas.toDataURL("image/jpeg", 0.85);
       }
 
-      // Send to chat
-      onSelection({
+      const selectionData: SelectionData = {
         screenshot,
         page: pendingSelection.page,
-      });
+      };
+
+      // Send to appropriate target
+      if (target === "active" && onSelectionToActiveChat) {
+        onSelectionToActiveChat(selectionData);
+      } else {
+        onSelection(selectionData);
+      }
 
       // Clear selection
       cancelSelection();
@@ -541,14 +677,22 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     } finally {
       setIsCapturing(false);
     }
-  }, [pendingSelection, onSelection, cancelSelection]);
+  }, [pendingSelection, onSelection, onSelectionToActiveChat, cancelSelection]);
 
-  // Handle Enter key to confirm selection
+  // Handle Enter/Shift+Enter to confirm selection
+  // Enter = send to active chat (or new chat if none active)
+  // Shift+Enter = always send to a new chat
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Enter" && pendingSelection && !isCapturing) {
         e.preventDefault();
-        captureSelection();
+        if (e.shiftKey) {
+          // Shift+Enter: always create a new chat
+          captureSelection("new");
+        } else {
+          // Enter: send to active chat if one exists, otherwise new chat
+          captureSelection(hasActiveChat && onSelectionToActiveChat ? "active" : "new");
+        }
       } else if (e.key === "Escape" && (pendingSelection || isSelecting)) {
         e.preventDefault();
         e.stopPropagation(); // Don't close the viewer
@@ -558,7 +702,7 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [pendingSelection, isSelecting, isCapturing, captureSelection, cancelSelection]);
+  }, [pendingSelection, isSelecting, isCapturing, captureSelection, cancelSelection, hasActiveChat, onSelectionToActiveChat]);
 
   // Handle document load success
   const handleLoadSuccess = useCallback(({ numPages: pages }: { numPages: number }) => {
@@ -586,33 +730,60 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   }, []);
 
   // Scroll to specific page — recenters the sliding window and scrolls.
+  // We use INSTANT scroll (not smooth) and aggressively suppress the observer.
+  // Smooth scroll across hundreds of pages caused two bugs:
+  //   1. The IntersectionObserver fired for transit pages mid-animation,
+  //      committing a setVisiblePage that slid the window and changed page
+  //      heights underneath the animation, dumping the user on a wrong page.
+  //   2. The previous retry loop could fire a *second* scrollIntoView while
+  //      the first was still animating, producing a "runaway scroll" feel.
   const scrollToPage = useCallback((pageNum: number) => {
     const targetPage = Math.max(1, Math.min(numPages || pageNum, pageNum));
-    
-    // Recenter the window on the target page (this also evicts distant pages)
-    const target = getWindowPages(targetPage, numPages || targetPage);
-    setRenderedPages(target);
-    
-    // Update visible page (and ref) immediately
-    visiblePageRef.current = targetPage;
-    setVisiblePage(targetPage);
-    
+
+    // Suppress observer-driven updates while we navigate. We hold this for
+    // long enough to cover scroll commit + a few observer fires after.
+    isProgrammaticScrollRef.current = true;
+    if (programmaticScrollTimeoutRef.current) {
+      clearTimeout(programmaticScrollTimeoutRef.current);
+    }
+
     // Cancel any pending debounce so it doesn't overwrite our explicit navigation
     if (scrollDebounceRef.current) {
       clearTimeout(scrollDebounceRef.current);
       scrollDebounceRef.current = null;
     }
-    
-    // Try to scroll to the element; retry if React hasn't rendered it yet.
-    const tryScroll = (attempts: number) => {
+
+    // Recenter the window on the target page (this also evicts distant pages).
+    // Skip the anchor capture/restore for this transition — we're navigating
+    // explicitly, so we don't want to anchor to the *previous* visible page.
+    anchorRef.current = null;
+    setRenderedPages(getWindowPages(targetPage, numPages || targetPage));
+
+    visiblePageRef.current = targetPage;
+    setVisiblePage(targetPage);
+
+    // Try to scroll to the element; the page may not be in the DOM yet on the
+    // first frame (window state was just queued). Use rAF only — no timeout
+    // chain — and bail as soon as we find it.
+    let attempts = 0;
+    const tryScroll = () => {
+      attempts++;
       const pageElement = pageRefs.current.get(targetPage);
       if (pageElement) {
-        pageElement.scrollIntoView({ behavior: "smooth", block: "start" });
-      } else if (attempts > 0) {
-        requestAnimationFrame(() => setTimeout(() => tryScroll(attempts - 1), 50));
+        // Instant scroll: predictable, non-animated, won't fight the observer.
+        pageElement.scrollIntoView({ behavior: "auto", block: "start" });
+        // Re-enable observer once the scroll has settled.
+        programmaticScrollTimeoutRef.current = setTimeout(() => {
+          isProgrammaticScrollRef.current = false;
+        }, 200);
+      } else if (attempts < 20) {
+        requestAnimationFrame(tryScroll);
+      } else {
+        // Give up gracefully — re-enable observer so the UI isn't stuck.
+        isProgrammaticScrollRef.current = false;
       }
     };
-    tryScroll(10); // Up to ~500ms of retries
+    requestAnimationFrame(tryScroll);
   }, [numPages]);
 
   // Intercept internal PDF link clicks (annotation layer)
@@ -675,6 +846,16 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
   const scrollToFirst = useCallback(() => scrollToPage(1), [scrollToPage]);
   const scrollToLast = useCallback(() => scrollToPage(numPages), [scrollToPage, numPages]);
 
+  // External `initialPage` prop — scroll once the PDF is loaded.
+  // Re-fires only when the prop changes (clicking a different result).
+  const lastInitialPageRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!initialPage || !numPages) return;
+    if (lastInitialPageRef.current === initialPage) return;
+    lastInitialPageRef.current = initialPage;
+    scrollToPage(initialPage);
+  }, [initialPage, numPages, scrollToPage]);
+
   // Zoom handler that preserves the current page position.
   // When scale changes, page elements resize and the scroll offset shifts,
   // which can cause the viewport to land on a different page. We counteract
@@ -727,15 +908,37 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
     });
   }, []);
 
-  // Memoize the file prop to prevent unnecessary reloads
-  // react-pdf warns if the file object changes reference even when data is the same
-  // We use useMemo with fileData as the dependency - fileData only changes when:
-  // 1. A new document is loaded (different documentId)
-  // 2. Direct file data is provided/changed
-  // This ensures the file source object maintains stable identity between renders
+  // Memoize the file prop to prevent unnecessary reloads.
+  // CRITICAL: pdf.js's worker `transfers` the underlying ArrayBuffer when the
+  // main thread postMessages it across — after the first load the source
+  // buffer is detached. If react-pdf ever attempts to re-load (StrictMode
+  // double-invoke, prop reference change, HMR) it would re-postMessage the
+  // detached buffer and throw `DataCloneError: The object can not be cloned.`
+  //
+  // We hand pdf.js a *private copy* of the bytes so:
+  //   - The source `fileData` (and any shared parent buffer like
+  //     `directFileData`) stays intact across the worker transfer.
+  //   - Each new `fileData` produces a fresh copy that is safe to detach.
+  //   - When `fileData` is unchanged, the memo result is stable so react-pdf
+  //     won't re-load and won't re-transfer.
   const fileSource = useMemo(() => {
     if (!fileData) return null;
-    return { data: fileData };
+    if (isDetached(fileData)) {
+      // Defensive: the source was detached out from under us. Don't crash
+      // the render — just signal "no file" until a fresh load lands.
+      console.warn(
+        "[PDFViewer] fileData buffer was detached; skipping render until reload",
+      );
+      return null;
+    }
+    try {
+      const copy = new Uint8Array(fileData.byteLength);
+      copy.set(fileData);
+      return { data: copy };
+    } catch (err) {
+      console.warn("[PDFViewer] Failed to copy fileData:", err);
+      return null;
+    }
   }, [fileData]);
 
   // Calculate selection rectangle display coordinates
@@ -795,33 +998,52 @@ export function PDFViewer({ documentId, directFileData, onSelection, onSelection
 
       {/* Pending Selection Confirmation Banner */}
       {pendingSelection && (
-        <div className="flex-shrink-0 flex items-center justify-center gap-3 px-4 py-2 bg-fuchsia-50 dark:bg-[#ff00ff]/10 border-b border-fuchsia-200 dark:border-[#ff00ff]/30">
+        <div className="flex-shrink-0 flex items-center justify-center gap-3 px-4 py-2 bg-fuchsia-50 dark:bg-[#ff00ff]/10 border-b border-fuchsia-200 dark:border-[#ff00ff]/30 flex-wrap">
           <span className="text-sm text-fuchsia-600 dark:text-[#ff00ff] font-medium">
             Selection ready on page {pendingSelection.page}
           </span>
-          <button
-            onClick={captureSelection}
-            disabled={isCapturing}
-            className={cn(
-              "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium transition-all duration-200 disabled:opacity-50",
-              "bg-fuchsia-500 dark:bg-[#ff00ff] text-white",
-              "shadow-[3px_3px_6px_rgba(0,0,0,0.15),-3px_-3px_6px_rgba(255,255,255,0.3)]",
-              "hover:shadow-[4px_4px_8px_rgba(0,0,0,0.2),-4px_-4px_8px_rgba(255,255,255,0.4)]",
-              "active:shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]"
+          <div className="flex items-center gap-2">
+            {/* Send to current chat (Enter) */}
+            <button
+              onClick={() => captureSelection(hasActiveChat && onSelectionToActiveChat ? "active" : "new")}
+              disabled={isCapturing}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium transition-all duration-200 disabled:opacity-50",
+                "bg-fuchsia-500 dark:bg-[#ff00ff] text-white",
+                "shadow-[3px_3px_6px_rgba(0,0,0,0.15),-3px_-3px_6px_rgba(255,255,255,0.3)]",
+                "hover:shadow-[4px_4px_8px_rgba(0,0,0,0.2),-4px_-4px_8px_rgba(255,255,255,0.4)]",
+                "active:shadow-[inset_3px_3px_6px_rgba(0,0,0,0.2),inset_-3px_-3px_6px_rgba(255,255,255,0.1)]"
+              )}
+            >
+              {isCapturing ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Capturing...</span>
+                </>
+              ) : (
+                <>
+                  <Camera className="h-3.5 w-3.5" />
+                  <span>{hasActiveChat ? "Send to Chat" : "New Chat"} <kbd className="ml-1 px-1 py-0.5 rounded bg-white/20 text-[10px]">Enter</kbd></span>
+                </>
+              )}
+            </button>
+            {/* Send to new chat (Shift+Enter) - only show when there's already an active chat */}
+            {hasActiveChat && (
+              <button
+                onClick={() => captureSelection("new")}
+                disabled={isCapturing}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium transition-all duration-200 disabled:opacity-50",
+                  "bg-white dark:bg-neutral-900 text-fuchsia-600 dark:text-[#ff00ff]",
+                  "border border-fuchsia-300 dark:border-[#ff00ff]/40",
+                  "hover:bg-fuchsia-50 dark:hover:bg-[#ff00ff]/10",
+                  "active:bg-fuchsia-100 dark:active:bg-[#ff00ff]/20"
+                )}
+              >
+                <span>New Chat <kbd className="ml-1 px-1 py-0.5 rounded bg-fuchsia-100 dark:bg-[#ff00ff]/20 text-[10px]">Shift+Enter</kbd></span>
+              </button>
             )}
-          >
-            {isCapturing ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span>Capturing...</span>
-              </>
-            ) : (
-              <>
-                <Camera className="h-3.5 w-3.5" />
-                <span>Capture (Enter)</span>
-              </>
-            )}
-          </button>
+          </div>
           <button
             onClick={cancelSelection}
             className={cn(

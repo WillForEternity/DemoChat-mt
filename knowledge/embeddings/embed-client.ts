@@ -73,6 +73,10 @@ export async function embedTexts(
       openaiApiKey: key,
       model,
       dimensions,
+      // Mirror parsePdfWithAi: fall back to the env key when no user key is
+      // available. resolveApiKey on the server only honors this when no
+      // user-provided key is set, so owners and BYOK users are unaffected.
+      useFreeTrial: !key,
     }),
   });
 
@@ -114,6 +118,7 @@ export async function embedQuery(
       openaiApiKey: key,
       model,
       dimensions,
+      useFreeTrial: !key,
     }),
   });
 

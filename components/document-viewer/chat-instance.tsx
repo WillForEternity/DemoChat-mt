@@ -22,16 +22,18 @@ import { useClientTools } from "@/lib/use-client-tools";
 import { ChatMessage, type ChatMessageData } from "@/components/chat";
 import { cn } from "@/lib/utils";
 import type { MarginChat } from "./index";
-
+ 
 interface ChatInstanceProps {
   chat: MarginChat;
   /** Callback when messages change (for persisting chat state) */
   onMessagesChange: (messages: import("ai").UIMessage[]) => void;
   /** Callback when AI generates a title for this chat */
   onTitleChange: (title: string) => void;
+  /** Callback to clear incoming attachment after consuming it */
+  onClearIncomingAttachment: () => void;
 }
 
-export function ChatInstance({ chat, onMessagesChange, onTitleChange }: ChatInstanceProps) {
+export function ChatInstance({ chat, onMessagesChange, onTitleChange, onClearIncomingAttachment }: ChatInstanceProps) {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   
@@ -149,6 +151,19 @@ export function ChatInstance({ chat, onMessagesChange, onTitleChange }: ChatInst
       setPendingAttachment(null);
     }
   }, [chat.messages.length, pendingAttachment]);
+
+  // Handle incoming attachment from parent (e.g. screenshot sent to active chat via Enter)
+  useEffect(() => {
+    if (chat.incomingAttachment) {
+      const { screenshot, text, page } = chat.incomingAttachment;
+      if (screenshot || text) {
+        setPendingAttachment({ screenshot, text, page });
+        setInput(""); // Clear input so default prompt effect triggers
+      }
+      // Signal parent to clear the incoming attachment
+      onClearIncomingAttachment();
+    }
+  }, [chat.incomingAttachment, onClearIncomingAttachment]);
 
   // Auto-scroll on new messages
   useEffect(() => {

@@ -20,6 +20,7 @@ interface ChatPanelProps {
   onCollapse: () => void;
   onMessagesChange: (chatId: string, messages: import("ai").UIMessage[]) => void;
   onTitleChange: (chatId: string, title: string) => void;
+  onClearIncomingAttachment: (chatId: string) => void;
   onNewChat: () => void;
 }
 
@@ -31,6 +32,7 @@ export function ChatPanel({
   onCollapse,
   onMessagesChange,
   onTitleChange,
+  onClearIncomingAttachment,
   onNewChat,
 }: ChatPanelProps) {
   return (
@@ -83,7 +85,7 @@ export function ChatPanel({
               onClick={() => onTabChange(chat.id)}
               className={cn(
                 "flex items-center gap-1.5 px-3 py-2 text-sm whitespace-nowrap border-r border-gray-200 dark:border-neutral-700",
-                "transition-all duration-200 min-w-0 max-w-[200px]",
+                "transition-all duration-200 flex-shrink-0 min-w-[80px] max-w-[200px]",
                 activeChat === chat.id
                   ? cn(
                       "bg-white dark:bg-neutral-950 -mb-px font-medium",
@@ -120,6 +122,7 @@ export function ChatPanel({
               chat={chat}
               onMessagesChange={(messages) => onMessagesChange(chat.id, messages)}
               onTitleChange={(title) => onTitleChange(chat.id, title)}
+              onClearIncomingAttachment={() => onClearIncomingAttachment(chat.id)}
             />
           </div>
         ))}

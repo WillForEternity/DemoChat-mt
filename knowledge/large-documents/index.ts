@@ -13,6 +13,5 @@ export {
   removeDocumentUmapCache,
   clearDocumentUmapCache,
   type DocumentUmapProjection,
-  type DocumentUmapCache,
 } from "./idb";
 export * from "./operations";

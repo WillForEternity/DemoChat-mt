@@ -13,6 +13,24 @@
 import type { Chunk } from "./types";
 
 /**
+ * A single page of text (1-based, externally) used by `chunkPaged`.
+ * `pageIndex` is the 0-based index, matching `PageExtraction.pageIndex`.
+ */
+export interface PagedInput {
+  pageIndex: number;
+  text: string;
+}
+
+/**
+ * A chunk that knows which page range it came from.
+ * Used by the large-document v2 schema for citation-accurate search.
+ */
+export interface PagedChunk extends Chunk {
+  pageStart: number;
+  pageEnd: number;
+}
+
+/**
  * Configuration options for chunking.
  */
 export interface ChunkOptions {
@@ -69,6 +87,36 @@ function splitBySentences(text: string): string[] {
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * Hard-split a text that exceeds maxTokens with no sentence/paragraph breaks
+ * we can use. Prefers whitespace boundaries; falls back to a hard char cut so
+ * we never emit a chunk larger than `maxTokens`. This is the last line of
+ * defense before embedding (OpenAI rejects inputs > 8192 tokens).
+ */
+function hardSplitBySize(text: string, maxTokens: number): string[] {
+  const maxChars = tokensToChars(maxTokens);
+  if (text.length <= maxChars) return [text];
+  const out: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(text.length, i + maxChars);
+    if (end < text.length) {
+      const slice = text.slice(i, end);
+      const ws = Math.max(
+        slice.lastIndexOf(" "),
+        slice.lastIndexOf("\n"),
+        slice.lastIndexOf("\t"),
+      );
+      if (ws > maxChars * 0.5) {
+        end = i + ws;
+      }
+    }
+    out.push(text.slice(i, end).trim());
+    i = end;
+  }
+  return out.filter((s) => s.length > 0);
 }
 
 /**
@@ -179,6 +227,111 @@ export function chunkMarkdown(
   });
 
   return chunks;
+}
+
+/**
+ * Page-aware chunker for large documents (v2 schema).
+ *
+ * Joins pages with a sentinel `\n\n` separator, runs the existing
+ * markdown chunker over the result, then attaches `pageStart` /
+ * `pageEnd` to each chunk based on the source pages its characters
+ * came from.
+ *
+ * Definition (matches PDF_TRANSCRIPTION_ACTION_PLAN.md):
+ *   - `pageStart` = page of the chunk's FIRST character.
+ *   - `pageEnd` differs from `pageStart` only when ≥30% of the chunk's
+ *     characters come from a subsequent page (overlap pulling in two
+ *     sentences from the next page does NOT flip `pageEnd`).
+ */
+export function chunkPaged(
+  pages: PagedInput[],
+  options: ChunkOptions = DEFAULT_OPTIONS,
+): PagedChunk[] {
+  if (pages.length === 0) return [];
+
+  // Build joined content + a parallel page-index lookup.
+  // `pageOfOffset[i]` is the 0-based page that character `i` of the
+  // joined string belongs to.
+  const SEP = "\n\n";
+  const parts: string[] = [];
+  const pageOfOffset: Uint32Array[] = []; // we'll concat into one Uint32Array below
+
+  let total = 0;
+  for (let i = 0; i < pages.length; i++) {
+    const text = pages[i].text;
+    parts.push(text);
+    total += text.length;
+    if (i < pages.length - 1) total += SEP.length;
+  }
+
+  const offsetMap = new Uint32Array(total);
+  let cursor = 0;
+  for (let i = 0; i < pages.length; i++) {
+    const text = pages[i].text;
+    const pageIdx = pages[i].pageIndex;
+    for (let k = 0; k < text.length; k++) {
+      offsetMap[cursor + k] = pageIdx;
+    }
+    cursor += text.length;
+    if (i < pages.length - 1) {
+      // Separator characters belong to the page that just ended.
+      for (let k = 0; k < SEP.length; k++) {
+        offsetMap[cursor + k] = pageIdx;
+      }
+      cursor += SEP.length;
+    }
+  }
+  // Note: `offsetMap` is the SAME holder we'll reference later.
+  pageOfOffset.push(offsetMap);
+
+  const joined = parts.join(SEP);
+  const chunks = chunkMarkdown(joined, options);
+
+  // Map each chunk back to a page range. `chunkMarkdown` may reflow
+  // text via overlap/splitting, so we locate each chunk's text by
+  // searching `joined` from a cursor that advances monotonically.
+  const out: PagedChunk[] = [];
+  let searchFrom = 0;
+
+  for (const c of chunks) {
+    let charStart = joined.indexOf(c.text, searchFrom);
+    if (charStart === -1) {
+      // Overlap may have prefixed sentences from the previous chunk; fall back
+      // to locating the trailing portion (last 80 chars) which is unaltered.
+      const tail = c.text.slice(Math.max(0, c.text.length - 80));
+      const tailIdx = joined.indexOf(tail, searchFrom);
+      charStart = tailIdx === -1 ? searchFrom : tailIdx - (c.text.length - tail.length);
+      if (charStart < 0) charStart = 0;
+    }
+    const charEnd = Math.min(joined.length, charStart + c.text.length);
+    searchFrom = Math.max(searchFrom, charStart);
+
+    // Tally chars per page covered by this chunk.
+    const perPage = new Map<number, number>();
+    for (let k = charStart; k < charEnd; k++) {
+      const p = offsetMap[k];
+      perPage.set(p, (perPage.get(p) ?? 0) + 1);
+    }
+
+    const startPage0 = offsetMap[charStart] ?? pages[0].pageIndex;
+    const totalChars = Math.max(1, charEnd - charStart);
+
+    // pageEnd: only flip when a later page contributes ≥30% of the chunk.
+    let endPage0 = startPage0;
+    for (const [page, count] of perPage) {
+      if (page > endPage0 && count / totalChars >= 0.3) {
+        endPage0 = page;
+      }
+    }
+
+    out.push({
+      ...c,
+      pageStart: startPage0 + 1, // expose 1-based to the rest of the system
+      pageEnd: endPage0 + 1,
+    });
+  }
+
+  return out;
 }
 
 /**
@@ -312,7 +465,19 @@ function addChunksFromSection(
       // Start new chunk with this paragraph
       // If paragraph itself is too large, split by sentences
       if (estimateTokens(paragraph) > maxTokens) {
-        const sentences = splitBySentences(paragraph);
+        const rawSentences = splitBySentences(paragraph);
+        // Any single "sentence" that is itself larger than maxTokens (common
+        // for OCR / AI-transcribed pages with no punctuation) gets hard-split
+        // by size so we never produce a chunk that exceeds the embedding
+        // model's input limit.
+        const sentences: string[] = [];
+        for (const s of rawSentences) {
+          if (estimateTokens(s) > maxTokens) {
+            sentences.push(...hardSplitBySize(s, maxTokens));
+          } else {
+            sentences.push(s);
+          }
+        }
         let sentenceChunk = "";
 
         for (const sentence of sentences) {

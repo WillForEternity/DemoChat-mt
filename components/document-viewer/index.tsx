@@ -44,6 +44,8 @@ export interface MarginChat {
   messages: import("ai").UIMessage[];
   /** Generated title for this chat */
   title: string;
+  /** Pending attachment added after chat creation (e.g. new screenshot sent to existing chat) */
+  incomingAttachment?: SelectionData;
 }
 
 interface DocumentViewerProps {
@@ -53,6 +55,8 @@ interface DocumentViewerProps {
   directFile?: File;
   /** Direct file data as ArrayBuffer (alternative to directFile) */
   directFileData?: ArrayBuffer;
+  /** Optional 1-based page to scroll to on open (Phase 5: search-result citations) */
+  initialPage?: number;
   onClose: () => void;
 }
 
@@ -60,7 +64,7 @@ interface DocumentViewerProps {
 // COMPONENT
 // =============================================================================
 
-export function DocumentViewer({ document, directFile, directFileData, onClose }: DocumentViewerProps) {
+export function DocumentViewer({ document, directFile, directFileData, initialPage, onClose }: DocumentViewerProps) {
   // Panel refs for imperative control
   const sidebarRef = useRef<ImperativePanelHandle>(null);
   const chatPanelRef = useRef<ImperativePanelHandle>(null);
@@ -88,7 +92,7 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
     chunkCount: 0,
     uploadedAt: Date.now(),
     indexedAt: 0,
-    status: "indexing" as const,
+    status: "extracting" as const,
   } : null);
   
   const [currentDocument, setCurrentDocument] = useState<LargeDocumentMetadata | null>(initialDocument);
@@ -103,13 +107,17 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
     }
   }, [directFile, directArrayBuffer]);
 
-  // Load all documents for sidebar (include processing documents for immediate viewing)
+  // Load all documents for sidebar. Show every document the parent browser
+  // shows (no status filter) — if a row exists in the list, it's viewable.
   useEffect(() => {
-    getAllLargeDocuments().then((docs) => {
-      docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
-      // Allow viewing documents that are ready, indexing, or uploading (have file stored)
-      setAllDocuments(docs.filter(d => d.status === "ready" || d.status === "indexing" || d.status === "uploading"));
-    });
+    getAllLargeDocuments()
+      .then((docs) => {
+        docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
+        setAllDocuments(docs);
+      })
+      .catch((err) => {
+        console.error("[DocViewer] Failed to load document list:", err);
+      });
   }, []);
 
   // Poll for document status updates when viewing a processing document.
@@ -135,7 +143,7 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
           setDirectArrayBuffer(null);
           // Refresh sidebar
           docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
-          setAllDocuments(docs.filter(d => d.status === "ready" || d.status === "indexing" || d.status === "uploading"));
+          setAllDocuments(docs);
         }
       } else {
         // Known document — poll for status changes
@@ -145,7 +153,7 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
           // Also refresh the sidebar
           const docs = await getAllLargeDocuments();
           docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
-          setAllDocuments(docs.filter(d => d.status === "ready" || d.status === "indexing" || d.status === "uploading"));
+          setAllDocuments(docs);
         }
       }
     }, 2000); // Poll every 2 seconds
@@ -166,10 +174,23 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
     setChats((prev) => [...prev, newChat]);
     setActiveChat(id);
     // Auto-expand chat panel on first selection
-    if (chatPanelRef.current?.isCollapsed()) {
-      chatPanelRef.current.expand();
-    }
+    setChatPanelCollapsed(false);
   }, []);
+
+  // Handle selection sent to the active (current) chat tab
+  const handleSelectionToActiveChat = useCallback((selection: SelectionData) => {
+    if (!activeChat) {
+      // No active chat — fall back to creating a new one
+      handleSelection(selection);
+      return;
+    }
+    // Set incomingAttachment on the active chat so the ChatInstance picks it up
+    setChats((prev) => prev.map((chat) =>
+      chat.id === activeChat ? { ...chat, incomingAttachment: selection } : chat
+    ));
+    // Make sure the chat panel is visible
+    setChatPanelCollapsed(false);
+  }, [activeChat, handleSelection]);
 
   // Create a new empty chat (no selection)
   const handleNewChat = useCallback(() => {
@@ -184,9 +205,7 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
     setChats((prev) => [...prev, newChat]);
     setActiveChat(id);
     // Auto-expand chat panel
-    if (chatPanelRef.current?.isCollapsed()) {
-      chatPanelRef.current.expand();
-    }
+    setChatPanelCollapsed(false);
   }, []);
 
   // Update messages for a specific chat (called by ChatInstance)
@@ -200,6 +219,13 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
   const handleTitleChange = useCallback((chatId: string, title: string) => {
     setChats((prev) => prev.map((chat) =>
       chat.id === chatId ? { ...chat, title } : chat
+    ));
+  }, []);
+
+  // Clear incoming attachment after ChatInstance consumes it
+  const handleClearIncomingAttachment = useCallback((chatId: string) => {
+    setChats((prev) => prev.map((chat) =>
+      chat.id === chatId ? { ...chat, incomingAttachment: undefined } : chat
     ));
   }, []);
 
@@ -230,7 +256,7 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
 
   // Check if document is still processing
   const isDirectView = !!directFile || !!directFileData;
-  const isProcessing = isDirectView || (currentDocument && (currentDocument.status === "indexing" || currentDocument.status === "uploading"));
+  const isProcessing = isDirectView || (currentDocument && (currentDocument.status === "extracting" || currentDocument.status === "embedding" || currentDocument.status === "stored"));
   const hasError = currentDocument?.status === "error";
 
   // Handle case where no document is available
@@ -304,39 +330,13 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
         </div>
       )}
 
-      <PanelGroup direction="horizontal" className="flex-1 min-h-0">
-        {/* Left Sidebar - Collapsible (hide when viewing direct file) */}
-        {!isDirectView && currentDocument && (
-          <>
-            <Panel
-              ref={sidebarRef}
-              defaultSize={20}
-              minSize={15}
-              maxSize={30}
-              collapsible
-              collapsedSize={0}
-              onCollapse={() => setSidebarCollapsed(true)}
-              onExpand={() => setSidebarCollapsed(false)}
-            >
-              {!sidebarCollapsed && (
-                <DocumentSidebar
-                  documents={allDocuments}
-                  current={currentDocument}
-                  onSelect={setCurrentDocument}
-                  onCollapse={() => sidebarRef.current?.collapse()}
-                />
-              )}
-            </Panel>
-            <PanelResizeHandle className="w-1 bg-gray-200 dark:bg-neutral-700 hover:bg-fuchsia-500 dark:hover:bg-[#ff00ff] transition-colors" />
-          </>
-        )}
-
-        {/* Sidebar expand button when collapsed (hide when viewing direct file) */}
+      <div className="flex-1 min-h-0 flex">
+        {/* Sidebar expand button when collapsed (outside PanelGroup for balanced centering) */}
         {sidebarCollapsed && !isDirectView && (
           <div
-            onClick={() => sidebarRef.current?.expand()}
+            onClick={() => setSidebarCollapsed(false)}
             className={cn(
-              "w-12 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group",
+              "w-12 flex-shrink-0 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group",
               "bg-gray-50/50 dark:bg-neutral-950 border-r border-gray-200 dark:border-neutral-700"
             )}
             title="Show documents sidebar"
@@ -346,55 +346,95 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
           </div>
         )}
 
-        {/* Center - Document Viewer */}
-        <Panel defaultSize={60} minSize={30}>
-          {currentDocument && currentDocument.mimeType === "application/pdf" ? (
-            <PDFViewer
-              documentId={isDirectView ? undefined : currentDocument.id}
-              directFileData={directArrayBuffer || undefined}
-              onSelection={handleSelection}
-              onSelectionStateChange={setHasActiveSelection}
-            />
-          ) : currentDocument ? (
-            <TextViewer
-              documentId={currentDocument.id}
-              onSelection={handleSelection}
-            />
-          ) : null}
-        </Panel>
-
-        {/* Right - Chat Panel (always in DOM, collapsible) */}
-        <PanelResizeHandle className="w-1 bg-gray-200 dark:bg-neutral-700 hover:bg-fuchsia-500 dark:hover:bg-[#ff00ff] transition-colors" />
-        <Panel
-          ref={chatPanelRef}
-          defaultSize={0}
-          minSize={20}
-          maxSize={50}
-          collapsible
-          collapsedSize={0}
-          onCollapse={() => setChatPanelCollapsed(true)}
-          onExpand={() => setChatPanelCollapsed(false)}
-        >
-          {!chatPanelCollapsed && (
-            <ChatPanel
-              chats={chats}
-              activeChat={activeChat}
-              onTabChange={setActiveChat}
-              onCloseTab={handleCloseTab}
-              onCollapse={() => chatPanelRef.current?.collapse()}
-              onMessagesChange={handleMessagesChange}
-              onTitleChange={handleTitleChange}
-              onNewChat={handleNewChat}
-            />
+        <PanelGroup direction="horizontal" className="flex-1 min-w-0">
+          {/* Left Sidebar - Collapsible (hide when viewing direct file) */}
+          {!isDirectView && currentDocument && !sidebarCollapsed && (
+            <>
+              <Panel
+                ref={sidebarRef}
+                defaultSize={20}
+                minSize={15}
+                maxSize={30}
+                collapsible
+                collapsedSize={0}
+                onCollapse={() => setSidebarCollapsed(true)}
+                onExpand={() => setSidebarCollapsed(false)}
+              >
+                <DocumentSidebar
+                  documents={
+                    // Guarantee the currently-open document is always in the list,
+                    // even before the async fetch resolves or if it fails. Without
+                    // this, the sidebar can briefly (or permanently) show
+                    // "No documents available" while a PDF is open.
+                    allDocuments.some((d) => d.id === currentDocument.id)
+                      ? allDocuments
+                      : [currentDocument, ...allDocuments]
+                  }
+                  current={currentDocument}
+                  onSelect={setCurrentDocument}
+                  onCollapse={() => setSidebarCollapsed(true)}
+                />
+              </Panel>
+              <PanelResizeHandle className="w-1 bg-gray-200 dark:bg-neutral-700 hover:bg-fuchsia-500 dark:hover:bg-[#ff00ff] transition-colors" />
+            </>
           )}
-        </Panel>
 
-        {/* Chat panel expand button when collapsed */}
+          {/* Center - Document Viewer */}
+          <Panel defaultSize={sidebarCollapsed || isDirectView ? 100 : 60} minSize={30}>
+            {currentDocument && currentDocument.mimeType === "application/pdf" ? (
+              <PDFViewer
+                documentId={isDirectView ? undefined : currentDocument.id}
+                directFileData={directArrayBuffer || undefined}
+                initialPage={initialPage}
+                onSelection={handleSelection}
+                onSelectionToActiveChat={handleSelectionToActiveChat}
+                hasActiveChat={!!activeChat && !chatPanelCollapsed}
+                onSelectionStateChange={setHasActiveSelection}
+              />
+            ) : currentDocument ? (
+              <TextViewer
+                documentId={currentDocument.id}
+                onSelection={handleSelection}
+              />
+            ) : null}
+          </Panel>
+
+          {/* Right - Chat Panel (always in DOM, collapsible) */}
+          {!chatPanelCollapsed && (
+            <>
+              <PanelResizeHandle className="w-1 bg-gray-200 dark:bg-neutral-700 hover:bg-fuchsia-500 dark:hover:bg-[#ff00ff] transition-colors" />
+              <Panel
+                ref={chatPanelRef}
+                defaultSize={30}
+                minSize={20}
+                maxSize={50}
+                collapsible
+                collapsedSize={0}
+                onCollapse={() => setChatPanelCollapsed(true)}
+                onExpand={() => setChatPanelCollapsed(false)}
+              >
+                <ChatPanel
+                  chats={chats}
+                  activeChat={activeChat}
+                  onTabChange={setActiveChat}
+                  onCloseTab={handleCloseTab}
+                  onCollapse={() => setChatPanelCollapsed(true)}
+                  onMessagesChange={handleMessagesChange}
+                  onTitleChange={handleTitleChange}
+                  onClearIncomingAttachment={handleClearIncomingAttachment}
+                  onNewChat={handleNewChat}
+                />
+              </Panel>
+            </>
+          )}
+        </PanelGroup>
+
+        {/* Chat panel expand button when collapsed (outside PanelGroup for balanced centering) */}
         {chatPanelCollapsed && (
           <div
-            onClick={() => chatPanelRef.current?.expand()}
+            onClick={() => setChatPanelCollapsed(false)}
             className={cn(
-              "w-12 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group relative",
+              "w-12 flex-shrink-0 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group relative",
               "bg-gray-50/50 dark:bg-neutral-950 border-l border-gray-200 dark:border-neutral-700"
             )}
             title="Show chat panel"
@@ -411,7 +451,7 @@ export function DocumentViewer({ document, directFile, directFileData, onClose }
             <ChevronLeft className="h-3 w-3 text-gray-500 dark:text-neutral-500 group-hover:text-gray-700 dark:group-hover:text-neutral-300 transition-colors" />
           </div>
         )}
-      </PanelGroup>
+      </div>
     </div>
   );
 }

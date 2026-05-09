@@ -10,13 +10,31 @@
  * - Chunk overlap: 75 tokens (~15%, NVIDIA benchmark optimal)
  * - Optional reranking: Cross-encoder reranking for 20-40% accuracy boost
  * - Hybrid search with RRF fusion for better precision/recall balance
+ *
+ * Phases 3/4/5/6/7 of PDF_TRANSCRIPTION_ACTION_PLAN.md:
+ * - Per-page extraction with quality scoring (Phase 3)
+ * - Parallel AI extraction over 5-page sub-PDFs (Phase 4)
+ * - Page-aware chunking with required pageStart/pageEnd (Phase 5)
+ * - New status enum: stored | extracting | embedding | ready | error (Phase 6)
+ * - Per-page extraction cache, keyed by file hash, for cheap retries (Phase 7)
  */
 
-import { getLargeDocumentsDb, removeDocumentUmapCache, storeDocumentFile, deleteDocumentFile, getDocumentFile } from "./idb";
-import { chunkMarkdown, type ChunkOptions } from "../embeddings/chunker";
+import {
+  getLargeDocumentsDb,
+  removeDocumentUmapCache,
+  storeDocumentFile,
+  deleteDocumentFile,
+  getDocumentFile,
+  getCachedPageExtraction,
+  setCachedPageExtraction,
+  deleteCachedExtractionsForDocument,
+} from "./idb";
+import { chunkMarkdown, chunkPaged, type ChunkOptions, type PagedChunk } from "../embeddings/chunker";
 import { embedTexts, embedQuery } from "../embeddings/embed-client";
 import { rerank, getRecommendedReranker, type RerankDocument, type RerankerConfig } from "../embeddings/reranker";
 import { largeDocLexicalSearch, detectQueryType, type LargeDocLexicalResult } from "./lexical-search";
+import { extractPdfPages, type PageExtraction } from "./page-extraction";
+import { groupPagesForAi, extractRangesViaAi } from "./pdf-split";
 import type {
   LargeDocumentMetadata,
   LargeDocumentChunk,
@@ -25,46 +43,26 @@ import type {
   LargeDocumentFile,
 } from "./types";
 
-/**
- * Default chunking options for large documents.
- * Optimized for document Q&A use cases.
- */
 const DEFAULT_CHUNK_OPTIONS: ChunkOptions = {
-  maxTokens: 512,      // Optimal for fact-focused retrieval
-  overlapTokens: 75,   // ~15% overlap for context continuity
-  minTokens: 50,       // Minimum chunk size
+  maxTokens: 512,
+  overlapTokens: 75,
+  minTokens: 50,
 };
 
-/**
- * Search options for large documents.
- */
 export interface LargeDocumentSearchOptions {
-  /** Number of results to return (default: 10) */
   topK?: number;
-  /** Minimum similarity threshold (default: 0.3) */
   threshold?: number;
-  /** Enable reranking for better accuracy (default: auto-detect) */
   rerank?: boolean;
-  /** Reranker backend to use */
   rerankerBackend?: RerankerConfig["backend"];
-  /** Number of candidates to retrieve before reranking (default: 50) */
   retrieveK?: number;
-  /** Include matched terms in results */
   includeBreakdown?: boolean;
-  /** RRF smoothing constant k (default: 60) */
   rrfK?: number;
 }
 
-/**
- * Generate a UUID for document IDs.
- */
 function generateId(): string {
   return crypto.randomUUID();
 }
 
-/**
- * Compute SHA-256 hash for content change detection.
- */
 async function sha256(text: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(text);
@@ -74,9 +72,13 @@ async function sha256(text: string): Promise<string> {
     .join("");
 }
 
-/**
- * Cosine similarity between two vectors.
- */
+async function sha256Bytes(bytes: ArrayBuffer): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0,
     normA = 0,
@@ -91,155 +93,57 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 // =============================================================================
-// PDF EXTRACTION
+// PDF EXTRACTION (Phase 3+4+7 pipeline)
 // =============================================================================
 
 /**
- * Check if extracted text appears to be meaningful content vs just artifacts.
- * Scanned PDFs often have partial text like page numbers, headers, or OCR fragments
- * that pass basic length checks but aren't useful content.
+ * Re-export of the modern per-page extractor. The legacy `extractPdfText`
+ * wrapper still lives in `page-extraction.ts` for one release so the
+ * legacy `uploadLargeDocumentFromText` path keeps working.
  */
-function isTextMeaningful(text: string, numPages: number): boolean {
-  const trimmed = text.trim();
-  
-  // Minimum characters per page - academic papers typically have 2000-4000 chars/page
-  // We use a low threshold of 500 chars/page to account for image-heavy PDFs
-  const minCharsPerPage = 500;
-  const expectedMinChars = numPages * minCharsPerPage;
-  
-  if (trimmed.length < expectedMinChars) {
-    console.log(`[PDF] Text too short: ${trimmed.length} chars for ${numPages} pages (expected min ${expectedMinChars})`);
-    return false;
-  }
-  
-  // Check for word-like patterns - real text should have mostly alphabetic words
-  // Count words (sequences of 3+ letters)
-  const words = trimmed.match(/[a-zA-Z]{3,}/g) || [];
-  const wordDensity = words.length / (trimmed.length / 100); // words per 100 chars
-  
-  // Real text typically has 10-20 words per 100 chars
-  // Garbage/fragments have much lower density
-  if (wordDensity < 5) {
-    console.log(`[PDF] Low word density: ${wordDensity.toFixed(2)} words/100 chars`);
-    return false;
-  }
-  
-  // Check that we have reasonable sentence-like structure
-  // Real text has periods, commas, spaces in expected ratios
-  const spaceRatio = (trimmed.match(/ /g) || []).length / trimmed.length;
-  if (spaceRatio < 0.1 || spaceRatio > 0.3) {
-    console.log(`[PDF] Unusual space ratio: ${(spaceRatio * 100).toFixed(1)}%`);
-    return false;
-  }
-  
-  return true;
-}
+export { extractPdfPages } from "./page-extraction";
+export { extractPdfText } from "./page-extraction";
 
 /**
- * Extract text from a PDF using PDF.js (client-side, free).
- * Returns null if the extracted text is too short or appears to be
- * low-quality (likely a scanned PDF that needs OCR).
+ * Send a PDF (or sub-PDF) to `/api/parse-pdf` and return the extracted text.
+ *
+ * The route returns a text stream (Phase 4); we collect it into a single
+ * string here for callers that don't care about deltas. Provider is
+ * Gemini 2.5 Flash.
  */
-export async function extractPdfText(
-  file: File
-): Promise<{ text: string; numPages: number } | null> {
-  try {
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf");
-    
-    // Configure worker if not already set
-    // Use unpkg CDN with matching version to avoid version mismatch errors
-    // Note: version is accessed via default export or directly - cast to access it
-    if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-      const version = (pdfjs as unknown as { version: string }).version || "4.9.155";
-      pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
-    }
-
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-    const pageTexts: string[] = [];
-
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      const text = content.items
-        .map((item: { str?: string }) => item.str || "")
-        .join(" ");
-      pageTexts.push(text);
-    }
-
-    const fullText = pageTexts.join("\n\n");
-    
-    // Check if we got meaningful text (not just headers/footers/page numbers)
-    if (!isTextMeaningful(fullText, pdf.numPages)) {
-      console.log("[PDF] Text extraction yielded low-quality content, fallback to AI OCR needed");
-      return null; // Signal that fallback is needed
-    }
-
-    console.log(`[PDF] Extracted ${fullText.length} chars from ${pdf.numPages} pages (quality check passed)`);
-    return { text: fullText, numPages: pdf.numPages };
-  } catch (error) {
-    console.error("[PDF] PDF.js extraction failed:", error);
-    return null; // Signal fallback needed
-  }
-}
-
-/**
- * Parse a scanned PDF using Claude Haiku via the /api/parse-pdf endpoint.
- * This is the fallback when PDF.js can't extract text.
- */
-export async function parsePdfWithClaude(file: File): Promise<string> {
+export async function parsePdfWithAi(file: File): Promise<string> {
   const formData = new FormData();
   formData.append("file", file);
-  // Use free trial for PDF OCR - this is a background indexing operation
   formData.append("useFreeTrial", "true");
 
-  const response = await fetch("/api/parse-pdf", {
-    method: "POST",
-    body: formData,
-  });
-
+  const response = await fetch("/api/parse-pdf", { method: "POST", body: formData });
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "PDF parsing with AI failed");
-  }
-
-  const { text } = await response.json();
-  console.log(`[PDF] Claude extracted ${text.length} chars`);
-  return text;
-}
-
-/**
- * Parse document content based on MIME type.
- * Currently supports plain text, markdown, and PDF.
- */
-async function parseDocument(
-  content: ArrayBuffer | string,
-  mimeType: string
-): Promise<string> {
-  // Handle text-based formats
-  if (
-    mimeType.startsWith("text/") ||
-    mimeType === "application/json" ||
-    mimeType === "application/xml"
-  ) {
-    if (typeof content === "string") {
-      return content;
+    let message = "PDF parsing with AI failed";
+    try {
+      const err = await response.json();
+      message = err.error ?? message;
+    } catch {
+      // ignore
     }
-    const decoder = new TextDecoder("utf-8");
-    return decoder.decode(content);
+    throw new Error(message);
   }
 
-  // PDF is now handled in uploadLargeDocument directly
-  if (mimeType === "application/pdf") {
-    throw new Error("PDF files should be processed via extractPdfText or parsePdfWithClaude");
+  if (!response.body) {
+    return await response.text();
   }
-
-  throw new Error(`Unsupported file type: ${mimeType}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += decoder.decode(value, { stream: true });
+  }
+  out += decoder.decode();
+  console.log(`[PDF] Gemini extracted ${out.length} chars`);
+  return out;
 }
 
-/**
- * Result of storing a document (fast operation).
- */
 export interface StoredDocumentResult {
   metadata: LargeDocumentMetadata;
   fileData: ArrayBuffer;
@@ -247,20 +151,17 @@ export interface StoredDocumentResult {
 
 /**
  * Store a large document for immediate viewing.
- * This is the fast path - stores file and metadata, returns immediately.
- * Call indexLargeDocumentInBackground() separately to index for search.
- *
- * @returns metadata and file data for immediate viewing
+ * Fast path: writes file + metadata, status = `stored`.
+ * Call `indexLargeDocumentInBackground()` separately to index for search.
  */
 export async function storeLargeDocument(
   file: File,
-  description?: string
+  description?: string,
 ): Promise<StoredDocumentResult> {
   const db = await getLargeDocumentsDb();
   const documentId = generateId();
   const mimeType = file.type || "text/plain";
 
-  // Create initial metadata with pending_index status
   const metadata: LargeDocumentMetadata = {
     id: documentId,
     filename: file.name,
@@ -270,233 +171,638 @@ export async function storeLargeDocument(
     uploadedAt: Date.now(),
     indexedAt: 0,
     description,
-    status: "uploading", // Will be updated to "indexing" when background index starts
+    status: "stored",
   };
 
-  // Save initial metadata
   await db.put("documents", metadata);
 
-  // Store original file for viewing
   const fileData = await file.arrayBuffer();
   await storeDocumentFile(documentId, fileData, mimeType);
 
-  console.log(`[LargeDocs] Stored document ${documentId} for immediate viewing`);
-
+  console.log(`[LargeDocs] Stored document ${documentId}`);
   return { metadata, fileData };
 }
 
+interface IndexedPage {
+  pageIndex: number; // 0-based
+  text: string;
+  source: "pdfjs" | "ai";
+}
+
 /**
- * Index a document in the background after it's been stored.
- * This is the slow path - parses, chunks, and embeds the content.
- * The document must have already been stored via storeLargeDocument().
+ * Interleaved PDF extraction.
  *
- * @param documentId - ID of the already-stored document
- * @param file - Original file for text extraction
- * @param onProgress - Optional progress callback
+ * Same per-page extraction pipeline as `runPdfExtraction`, but the pdfjs
+ * "good" pages and each AI range are handed to the `onPagesReady`
+ * callback as soon as they're available. The caller (typically
+ * `indexLargeDocumentInBackground`) chunks + embeds + persists each wave
+ * immediately, so a large document becomes searchable mid-extraction.
+ */
+async function runPdfExtractionInterleaved(
+  documentId: string,
+  file: File,
+  fileBytes: ArrayBuffer,
+  fileHash: string,
+  onProgress: ((p: IndexingProgress) => void) | undefined,
+  onPagesReady: (
+    pages: Array<{ pageIndex: number; text: string }>,
+    label: string,
+  ) => Promise<void>,
+): Promise<void> {
+  onProgress?.({
+    current: 0,
+    total: 5,
+    status: "pdf-extraction",
+    message: "Reading PDF pages…",
+  });
+
+  const { pages, numPages } = await extractPdfPages(file);
+
+  // Cache pdfjs results for "good" pages and persist them immediately.
+  const goodPages: Array<{ pageIndex: number; text: string }> = [];
+  for (const p of pages) {
+    if (p.quality === "good") {
+      await setCachedPageExtraction({
+        documentId,
+        pageIndex: p.pageIndex,
+        source: "pdfjs",
+        text: p.text,
+        fileHash,
+        createdAt: Date.now(),
+      });
+      goodPages.push({ pageIndex: p.pageIndex, text: p.text });
+    }
+  }
+
+  // Identify pages still needing AI; honor the per-page extraction cache so
+  // retries don't re-OCR previously-completed pages.
+  const pendingPages: PageExtraction[] = [];
+  const cachedAiPages: Array<{ pageIndex: number; text: string }> = [];
+  for (const p of pages) {
+    if (p.quality === "good") continue;
+    const cached = await getCachedPageExtraction(documentId, p.pageIndex, "ai", fileHash);
+    if (cached) {
+      cachedAiPages.push({ pageIndex: p.pageIndex, text: cached.text });
+    } else {
+      pendingPages.push(p);
+    }
+  }
+
+  // First wave: persist everything we already have (pdfjs good + cached AI).
+  // This makes the document searchable before any AI calls run.
+  const firstWave = [...goodPages, ...cachedAiPages].sort(
+    (a, b) => a.pageIndex - b.pageIndex,
+  );
+  if (firstWave.length > 0) {
+    await onPagesReady(firstWave, `pdfjs+cache (${firstWave.length} pages)`);
+  }
+
+  let pagesProcessed = firstWave.length;
+  onProgress?.({
+    current: 1,
+    total: 5,
+    status: "pdf-extraction",
+    message: pendingPages.length === 0
+      ? `Extracted ${numPages} pages from PDF.js`
+      : `pdf.js handled ${pagesProcessed}/${numPages} pages`,
+    pagesProcessed,
+    pagesTotal: numPages,
+    currentSource: "pdfjs",
+  });
+
+  if (pendingPages.length === 0) return;
+
+  const ranges = groupPagesForAi(pendingPages);
+  let rangesDone = 0;
+
+  onProgress?.({
+    current: 1.2,
+    total: 5,
+    status: "ai-extraction",
+    message: `AI extracting ${pendingPages.length} pages in ${ranges.length} chunk${ranges.length === 1 ? "" : "s"}…`,
+    pagesProcessed,
+    pagesTotal: numPages,
+    currentSource: "ai",
+    aiRangesDone: 0,
+    aiRangesTotal: ranges.length,
+  });
+
+  await extractRangesViaAi(fileBytes, ranges, {
+    concurrency: 4,
+    onRangeDone: async (result) => {
+      rangesDone++;
+      const rangeLen = result.range.endIndex - result.range.startIndex + 1;
+      pagesProcessed += rangeLen;
+
+      if (!result.error) {
+        const pagesForRange: Array<{ pageIndex: number; text: string }> = [];
+        for (const pp of result.pages) {
+          if (pp.text) {
+            await setCachedPageExtraction({
+              documentId,
+              pageIndex: pp.pageIndex,
+              source: "ai",
+              text: pp.text,
+              fileHash,
+              createdAt: Date.now(),
+            });
+            pagesForRange.push({ pageIndex: pp.pageIndex, text: pp.text });
+          }
+        }
+        if (pagesForRange.length > 0) {
+          await onPagesReady(
+            pagesForRange,
+            `ai range ${result.range.startIndex + 1}–${result.range.endIndex + 1}`,
+          );
+        }
+      }
+
+      onProgress?.({
+        current: 1.2 + (rangesDone / ranges.length) * 1.3,
+        total: 5,
+        status: "ai-extraction",
+        message: result.error
+          ? `Pages ${result.range.startIndex + 1}–${result.range.endIndex + 1} failed`
+          : `Extracted pages ${result.range.startIndex + 1}–${result.range.endIndex + 1}`,
+        pagesProcessed,
+        pagesTotal: numPages,
+        currentSource: "ai",
+        aiRangesDone: rangesDone,
+        aiRangesTotal: ranges.length,
+      });
+    },
+  });
+}
+
+/**
+ * Run the per-page PDF extraction pipeline:
+ *   1. pdf.js extracts every page locally; each page is quality-scored.
+ *   2. Pages flagged `low` or `failed` are grouped into ≤5-page ranges.
+ *   3. Sub-PDFs for those ranges are sent to /api/parse-pdf in parallel
+ *      (concurrency=4) — each call streams text back via Gemini 2.5 Flash.
+ *   4. Per-page results are written to the extractionCache (keyed by
+ *      [documentId, pageIndex, source] + invalidated on file-hash change).
+ *
+ * Per-range failures DO NOT fail the document: those pages return empty
+ * text and the caller can surface a "Pages X–Y failed" affordance.
+ *
+ * NOTE: This non-interleaved variant is preserved for legacy callers but
+ * the main indexing pipeline uses `runPdfExtractionInterleaved` so chunks
+ * become searchable mid-extraction.
+ */
+async function runPdfExtraction(
+  documentId: string,
+  file: File,
+  fileBytes: ArrayBuffer,
+  fileHash: string,
+  onProgress: ((p: IndexingProgress) => void) | undefined,
+): Promise<IndexedPage[]> {
+  // Step 1: per-page extraction with pdf.js
+  onProgress?.({
+    current: 0,
+    total: 5,
+    status: "pdf-extraction",
+    message: "Reading PDF pages…",
+  });
+
+  const { pages, numPages } = await extractPdfPages(file);
+
+  // Cache pdfjs results for "good" pages (cheap to recompute, but keeping
+  // them lets retries skip pdf.js entirely on huge PDFs).
+  for (const p of pages) {
+    if (p.quality === "good") {
+      await setCachedPageExtraction({
+        documentId,
+        pageIndex: p.pageIndex,
+        source: "pdfjs",
+        text: p.text,
+        fileHash,
+        createdAt: Date.now(),
+      });
+    }
+  }
+
+  const final: IndexedPage[] = pages.map((p) =>
+    p.quality === "good"
+      ? { pageIndex: p.pageIndex, text: p.text, source: "pdfjs" as const }
+      : { pageIndex: p.pageIndex, text: "", source: "ai" as const },
+  );
+
+  // Step 2: identify pages still needing AI (skip those already cached).
+  const pendingPages: PageExtraction[] = [];
+  for (const p of pages) {
+    if (p.quality === "good") continue;
+    const cached = await getCachedPageExtraction(documentId, p.pageIndex, "ai", fileHash);
+    if (cached) {
+      final[p.pageIndex] = {
+        pageIndex: p.pageIndex,
+        text: cached.text,
+        source: "ai",
+      };
+    } else {
+      pendingPages.push(p);
+    }
+  }
+
+  let pagesProcessed = pages.filter((p) => p.quality === "good").length +
+    (pages.length - pages.filter((p) => p.quality === "good").length - pendingPages.length);
+
+  onProgress?.({
+    current: 1,
+    total: 5,
+    status: "pdf-extraction",
+    message: pendingPages.length === 0
+      ? `Extracted ${numPages} pages from PDF.js`
+      : `pdf.js handled ${pagesProcessed}/${numPages} pages`,
+    pagesProcessed,
+    pagesTotal: numPages,
+    currentSource: "pdfjs",
+  });
+
+  if (pendingPages.length === 0) return final;
+
+  // Step 3: group + parallel AI extraction.
+  const ranges = groupPagesForAi(pendingPages);
+  let rangesDone = 0;
+
+  onProgress?.({
+    current: 1.2,
+    total: 5,
+    status: "ai-extraction",
+    message: `AI extracting ${pendingPages.length} pages in ${ranges.length} chunk${ranges.length === 1 ? "" : "s"}…`,
+    pagesProcessed,
+    pagesTotal: numPages,
+    currentSource: "ai",
+    aiRangesDone: 0,
+    aiRangesTotal: ranges.length,
+  });
+
+  const results = await extractRangesViaAi(fileBytes, ranges, {
+    concurrency: 4,
+    onRangeDone: async (result) => {
+      rangesDone++;
+      const rangeLen = result.range.endIndex - result.range.startIndex + 1;
+      pagesProcessed += rangeLen;
+
+      // Write per-page cache entries — for now Gemini returns the joined
+      // text on the first page of the range; we cache it as the entire
+      // range's text on that first page slot.
+      if (!result.error) {
+        for (const pp of result.pages) {
+          if (pp.text) {
+            await setCachedPageExtraction({
+              documentId,
+              pageIndex: pp.pageIndex,
+              source: "ai",
+              text: pp.text,
+              fileHash,
+              createdAt: Date.now(),
+            });
+          }
+          final[pp.pageIndex] = {
+            pageIndex: pp.pageIndex,
+            text: pp.text,
+            source: "ai",
+          };
+        }
+      }
+
+      onProgress?.({
+        current: 1.2 + (rangesDone / ranges.length) * 1.3,
+        total: 5,
+        status: "ai-extraction",
+        message: result.error
+          ? `Pages ${result.range.startIndex + 1}–${result.range.endIndex + 1} failed`
+          : `Extracted pages ${result.range.startIndex + 1}–${result.range.endIndex + 1}`,
+        pagesProcessed,
+        pagesTotal: numPages,
+        currentSource: "ai",
+        aiRangesDone: rangesDone,
+        aiRangesTotal: ranges.length,
+      });
+    },
+  });
+
+  const failedRanges = results.filter((r) => r.error);
+  if (failedRanges.length > 0) {
+    console.warn(
+      `[LargeDocs] ${failedRanges.length}/${results.length} AI ranges failed for ${documentId}`,
+    );
+  }
+
+  return final;
+}
+
+/**
+ * Chunk + embed + persist a group of pages.
+ *
+ * Pulled out of `indexLargeDocumentInBackground` so it can be called
+ * incrementally — once for the pdfjs "good" pages right after extraction,
+ * and again for each AI range as it completes. This is what makes a document
+ * searchable mid-extraction.
+ *
+ * - `nextChunkIndex` is a mutable counter so chunkIndex stays globally unique
+ *   across calls within one document.
+ * - `existingHashMap` is shared across calls so embedding reuse keeps working
+ *   even when chunks land in multiple waves.
+ * - Writes are committed per embedding batch (≤20) so partial RAG kicks in
+ *   ASAP.
+ */
+async function chunkEmbedAndPersistPages(
+  db: Awaited<ReturnType<typeof getLargeDocumentsDb>>,
+  documentId: string,
+  pages: Array<{ pageIndex: number; text: string }>,
+  existingHashMap: Map<string, LargeDocumentChunk>,
+  nextChunkIndex: { value: number },
+  reusedCount: { value: number },
+  groupLabel: string,
+): Promise<LargeDocumentChunk[]> {
+  const eligible = pages.filter((p) => p.text && p.text.trim().length > 0);
+  if (eligible.length === 0) return [];
+
+  const chunks: PagedChunk[] = chunkPaged(eligible, DEFAULT_CHUNK_OPTIONS);
+  if (chunks.length === 0) return [];
+
+  const BATCH_SIZE = 20;
+  const written: LargeDocumentChunk[] = [];
+
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
+
+    const batchHashes: string[] = [];
+    const needsEmbedding: { batchIdx: number; text: string }[] = [];
+    for (let j = 0; j < batch.length; j++) {
+      const hash = await sha256(batch[j].text);
+      batchHashes.push(hash);
+      if (!existingHashMap.has(hash)) {
+        needsEmbedding.push({ batchIdx: j, text: batch[j].text });
+      }
+    }
+
+    let newEmbeddings: number[][] = [];
+    if (needsEmbedding.length > 0) {
+      newEmbeddings = await embedTexts(needsEmbedding.map((n) => n.text));
+    }
+
+    const batchRecords: LargeDocumentChunk[] = [];
+    let newEmbIdx = 0;
+    for (let j = 0; j < batch.length; j++) {
+      const chunk = batch[j];
+      const contentHash = batchHashes[j];
+      const existing = existingHashMap.get(contentHash);
+
+      let embedding: number[];
+      if (existing) {
+        embedding = existing.embedding;
+        reusedCount.value++;
+      } else {
+        embedding = newEmbeddings[newEmbIdx++];
+      }
+
+      const chunkIndex = nextChunkIndex.value++;
+      const record: LargeDocumentChunk = {
+        id: `${documentId}#${chunkIndex}`,
+        documentId,
+        chunkIndex,
+        chunkText: chunk.text,
+        contentHash,
+        headingPath: chunk.headingPath,
+        embedding,
+        updatedAt: Date.now(),
+        pageStart: chunk.pageStart,
+        pageEnd: chunk.pageEnd,
+      };
+      batchRecords.push(record);
+      // Track this hash so a later wave with identical text reuses the new
+      // embedding instead of paying for another API call.
+      existingHashMap.set(contentHash, record);
+    }
+
+    const batchTx = db.transaction("chunks", "readwrite");
+    for (const record of batchRecords) {
+      await batchTx.store.put(record);
+    }
+    await batchTx.done;
+
+    written.push(...batchRecords);
+  }
+
+  console.log(
+    `[LargeDocs] ${groupLabel}: chunked+embedded+wrote ${written.length} chunks`,
+  );
+  return written;
+}
+
+/**
+ * Index a stored document in the background.
+ *
+ * Status flow: `stored` -> `extracting` -> `embedding` -> `ready`.
+ * On failure: status -> `error` with `errorMessage` set.
+ *
+ * For PDFs, chunking + embedding is interleaved with extraction so chunks
+ * become searchable as soon as their pages are extracted, rather than
+ * waiting for the entire document. The status flips from `extracting` to
+ * `embedding` as soon as the first chunk is written.
  */
 export async function indexLargeDocumentInBackground(
   documentId: string,
   file: File,
-  onProgress?: (progress: IndexingProgress) => void
+  onProgress?: (progress: IndexingProgress) => void,
 ): Promise<LargeDocumentMetadata> {
   const db = await getLargeDocumentsDb();
   const mimeType = file.type || "text/plain";
 
-  // Get existing metadata
-  let metadata = await db.get("documents", documentId);
+  const metadata = await db.get("documents", documentId);
   if (!metadata) {
     throw new Error(`Document ${documentId} not found for indexing`);
   }
 
   try {
-    // Update status to indexing
-    metadata.status = "indexing";
+    metadata.status = "extracting";
+    // Clear any prior error from a previous failed run so the UI doesn't
+    // keep showing a stale "API key required"/etc. message during retry.
+    metadata.errorMessage = undefined;
     await db.put("documents", metadata);
 
-    // Report parsing status
     onProgress?.({
       current: 0,
       total: 5,
       status: "parsing",
-      message: "Parsing document...",
+      message: "Parsing document…",
     });
 
-    let content: string;
-
-    // Handle PDF files specially
-    if (mimeType === "application/pdf") {
-      // Try PDF.js extraction first (free, fast)
-      onProgress?.({
-        current: 0,
-        total: 5,
-        status: "pdf-extraction",
-        message: "Extracting text from PDF...",
-      });
-
-      const pdfResult = await extractPdfText(file);
-      
-      if (pdfResult) {
-        // PDF.js extraction succeeded
-        content = pdfResult.text;
-      } else {
-        // Fallback to Claude Haiku for scanned PDFs
-        onProgress?.({
-          current: 0.5,
-          total: 5,
-          status: "ai-extraction",
-          message: "Using AI to extract text from scanned PDF...",
-        });
-        
-        content = await parsePdfWithClaude(file);
-      }
-    } else {
-      // Read text-based file content directly
-      content = await file.text();
-    }
-
-    // Report chunking status
-    onProgress?.({
-      current: 1,
-      total: 5,
-      status: "chunking",
-      message: "Splitting into chunks...",
-    });
-
-    // Chunk the content with optimized settings for document Q&A
-    const chunks = chunkMarkdown(content, DEFAULT_CHUNK_OPTIONS);
-
-    if (chunks.length === 0) {
-      throw new Error("Document produced no chunks. It may be empty.");
-    }
-
-    // Report embedding status
-    onProgress?.({
-      current: 2,
-      total: 5,
-      status: "embedding",
-      message: `Embedding ${chunks.length} chunks...`,
-    });
-
-    // Load existing chunks for this document (for content hash change detection).
-    // If a chunk's text hasn't changed (same SHA-256 hash), we reuse the existing
-    // embedding instead of re-computing it — saving API calls and time.
+    // Snapshot existing chunks once so embedding reuse works across all
+    // interleaved waves below.
     const existingChunks = await db.getAllFromIndex("chunks", "by-document", documentId);
     const existingHashMap = new Map<string, LargeDocumentChunk>();
     for (const c of existingChunks) {
       existingHashMap.set(c.contentHash, c);
     }
     const reusedCount = { value: 0 };
+    const nextChunkIndex = { value: 0 };
+    const allWrittenIds = new Set<string>();
+    let firstWaveDone = false;
 
-    // Embed chunks in batches (20 at a time to avoid API limits)
-    const BATCH_SIZE = 20;
-    const allChunkRecords: LargeDocumentChunk[] = [];
-
-    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-      const batch = chunks.slice(i, i + BATCH_SIZE);
-
-      // Compute hashes first to detect unchanged chunks
-      const batchHashes: string[] = [];
-      const needsEmbedding: { batchIdx: number; text: string }[] = [];
-      for (let j = 0; j < batch.length; j++) {
-        const hash = await sha256(batch[j].text);
-        batchHashes.push(hash);
-        const existing = existingHashMap.get(hash);
-        if (!existing) {
-          needsEmbedding.push({ batchIdx: j, text: batch[j].text });
-        }
-      }
-
-      // Only call the embedding API for chunks that actually changed
-      let newEmbeddings: number[][] = [];
-      if (needsEmbedding.length > 0) {
-        newEmbeddings = await embedTexts(needsEmbedding.map((n) => n.text));
-      }
-
-      // Build chunk records, reusing existing embeddings where possible
-      let newEmbIdx = 0;
-      for (let j = 0; j < batch.length; j++) {
-        const chunk = batch[j];
-        const chunkIndex = i + j;
-        const contentHash = batchHashes[j];
-        const existing = existingHashMap.get(contentHash);
-
-        let embedding: number[];
-        if (existing) {
-          // Reuse existing embedding — content unchanged
-          embedding = existing.embedding;
-          reusedCount.value++;
-        } else {
-          embedding = newEmbeddings[newEmbIdx++];
-        }
-
-        const chunkRecord: LargeDocumentChunk = {
-          id: `${documentId}#${chunkIndex}`,
-          documentId,
-          chunkIndex,
-          chunkText: chunk.text,
-          contentHash,
-          headingPath: chunk.headingPath,
-          embedding,
-          updatedAt: Date.now(),
-        };
-
-        allChunkRecords.push(chunkRecord);
-      }
-
-      // Update progress
-      const progress = Math.min(
-        2 + ((i + BATCH_SIZE) / chunks.length) * 2,
-        4
+    const persist = async (
+      pages: Array<{ pageIndex: number; text: string }>,
+      label: string,
+    ) => {
+      const written = await chunkEmbedAndPersistPages(
+        db,
+        documentId,
+        pages,
+        existingHashMap,
+        nextChunkIndex,
+        reusedCount,
+        label,
       );
-      onProgress?.({
-        current: progress,
-        total: 5,
-        status: "embedding",
-        message: `Embedded ${Math.min(i + BATCH_SIZE, chunks.length)} of ${chunks.length} chunks...`,
-      });
+      for (const r of written) allWrittenIds.add(r.id);
+
+      // First time we successfully write any chunks, flip to "embedding"
+      // so search picks the document up immediately.
+      if (!firstWaveDone && written.length > 0) {
+        firstWaveDone = true;
+        metadata.status = "embedding";
+        metadata.chunkCount = allWrittenIds.size;
+        await db.put("documents", metadata);
+      } else if (firstWaveDone && written.length > 0) {
+        // Keep chunkCount fresh as more waves land so the UI reflects progress.
+        metadata.chunkCount = allWrittenIds.size;
+        await db.put("documents", metadata);
+      }
+    };
+
+    if (mimeType === "application/pdf") {
+      const fileBytes = await file.arrayBuffer();
+      const fileHash = await sha256Bytes(fileBytes);
+
+      // Run extraction with an interleaved persist callback. The pdfjs
+      // "good" pages are persisted in one wave right after pdf.js finishes;
+      // each AI range becomes its own wave when it completes.
+      await runPdfExtractionInterleaved(
+        documentId,
+        file,
+        fileBytes,
+        fileHash,
+        onProgress,
+        persist,
+      );
+    } else {
+      const content = await file.text();
+      // Non-PDF sources are treated as a single page so the v2 schema
+      // invariant (`pageStart`/`pageEnd` required) is trivially satisfied.
+      // Use the markdown chunker to preserve heading-aware behavior, then
+      // tag pageStart/pageEnd = 1.
+      const flatChunks = chunkMarkdown(content, DEFAULT_CHUNK_OPTIONS).map((c) => ({
+        ...c,
+        pageStart: 1,
+        pageEnd: 1,
+      }));
+      // Reuse the per-batch persistence machinery by feeding it as a single
+      // page. chunkPaged on a single page would re-chunk, but we already have
+      // chunks — simulate by writing directly.
+      const BATCH_SIZE = 20;
+      for (let i = 0; i < flatChunks.length; i += BATCH_SIZE) {
+        const batch = flatChunks.slice(i, i + BATCH_SIZE);
+        const batchHashes: string[] = [];
+        const needsEmbedding: { batchIdx: number; text: string }[] = [];
+        for (let j = 0; j < batch.length; j++) {
+          const hash = await sha256(batch[j].text);
+          batchHashes.push(hash);
+          if (!existingHashMap.has(hash)) {
+            needsEmbedding.push({ batchIdx: j, text: batch[j].text });
+          }
+        }
+        let newEmbeddings: number[][] = [];
+        if (needsEmbedding.length > 0) {
+          newEmbeddings = await embedTexts(needsEmbedding.map((n) => n.text));
+        }
+        const batchRecords: LargeDocumentChunk[] = [];
+        let newEmbIdx = 0;
+        for (let j = 0; j < batch.length; j++) {
+          const chunk = batch[j];
+          const contentHash = batchHashes[j];
+          const existing = existingHashMap.get(contentHash);
+          let embedding: number[];
+          if (existing) {
+            embedding = existing.embedding;
+            reusedCount.value++;
+          } else {
+            embedding = newEmbeddings[newEmbIdx++];
+          }
+          const chunkIndex = nextChunkIndex.value++;
+          const record: LargeDocumentChunk = {
+            id: `${documentId}#${chunkIndex}`,
+            documentId,
+            chunkIndex,
+            chunkText: chunk.text,
+            contentHash,
+            headingPath: chunk.headingPath,
+            embedding,
+            updatedAt: Date.now(),
+            pageStart: chunk.pageStart,
+            pageEnd: chunk.pageEnd,
+          };
+          batchRecords.push(record);
+          existingHashMap.set(contentHash, record);
+        }
+        const tx = db.transaction("chunks", "readwrite");
+        for (const r of batchRecords) await tx.store.put(r);
+        await tx.done;
+        for (const r of batchRecords) allWrittenIds.add(r.id);
+
+        if (!firstWaveDone && batchRecords.length > 0) {
+          firstWaveDone = true;
+          metadata.status = "embedding";
+        }
+        metadata.chunkCount = allWrittenIds.size;
+        await db.put("documents", metadata);
+      }
+    }
+
+    if (allWrittenIds.size === 0) {
+      throw new Error("Document produced no chunks. It may be empty.");
     }
 
     if (reusedCount.value > 0) {
-      console.log(`[LargeDocs] Reused ${reusedCount.value}/${allChunkRecords.length} embeddings via content hash match`);
+      console.log(
+        `[LargeDocs] Reused ${reusedCount.value}/${allWrittenIds.size} embeddings via content hash match`,
+      );
     }
 
-    // Delete any old chunks that no longer exist (document may have shrunk)
+    // Stale-chunk cleanup: anything from a prior indexing pass that wasn't
+    // re-written this run.
     const oldChunkIds = new Set(existingChunks.map((c) => c.id));
-    const newChunkIds = new Set(allChunkRecords.map((c) => c.id));
-    const staleChunkIds = [...oldChunkIds].filter((id) => !newChunkIds.has(id));
-
-    // Store all chunks (and remove stale ones)
-    const tx = db.transaction("chunks", "readwrite");
-    for (const record of allChunkRecords) {
-      await tx.store.put(record);
+    const staleChunkIds = [...oldChunkIds].filter((id) => !allWrittenIds.has(id));
+    if (staleChunkIds.length > 0) {
+      const cleanupTx = db.transaction("chunks", "readwrite");
+      for (const staleId of staleChunkIds) {
+        await cleanupTx.store.delete(staleId);
+      }
+      await cleanupTx.done;
     }
-    for (const staleId of staleChunkIds) {
-      await tx.store.delete(staleId);
-    }
-    await tx.done;
 
-    // Update metadata with final stats
-    metadata.chunkCount = allChunkRecords.length;
+    metadata.chunkCount = allWrittenIds.size;
     metadata.indexedAt = Date.now();
     metadata.status = "ready";
+    metadata.errorMessage = undefined;
     await db.put("documents", metadata);
 
-    // Report complete
     onProgress?.({
       current: 5,
       total: 5,
       status: "complete",
-      message: `Indexed ${allChunkRecords.length} chunks successfully`,
+      message: `Indexed ${allWrittenIds.size} chunks successfully`,
     });
 
-    console.log(`[LargeDocs] Finished indexing document ${documentId}: ${allChunkRecords.length} chunks`);
+    console.log(
+      `[LargeDocs] Finished indexing document ${documentId}: ${allWrittenIds.size} chunks`,
+    );
 
     return metadata;
   } catch (error) {
-    // Update metadata with error (but keep file viewable)
     metadata.status = "error";
-    metadata.errorMessage =
-      error instanceof Error ? error.message : String(error);
+    metadata.errorMessage = error instanceof Error ? error.message : String(error);
     await db.put("documents", metadata);
 
     onProgress?.({
@@ -512,53 +818,64 @@ export async function indexLargeDocumentInBackground(
 }
 
 /**
- * Upload and index a large document.
- * This is the legacy combined function that stores and indexes synchronously.
- * For immediate viewing with background indexing, use storeLargeDocument() 
- * followed by indexLargeDocumentInBackground().
- *
- * Process:
- * 1. Store file for viewing (fast)
- * 2. Parse document content to text (with PDF extraction if needed)
- * 3. Chunk the text using the markdown chunker
- * 4. Embed all chunks in batches
- * 5. Store chunks with embeddings
+ * Upload + index synchronously. Legacy combined function; use
+ * `storeLargeDocument` + `indexLargeDocumentInBackground` for the fast
+ * "store-then-index" UX.
  */
 export async function uploadLargeDocument(
   file: File,
   description?: string,
-  onProgress?: (progress: IndexingProgress) => void
+  onProgress?: (progress: IndexingProgress) => void,
 ): Promise<LargeDocumentMetadata> {
-  // Store the document first (fast)
   const { metadata } = await storeLargeDocument(file, description);
-  
-  // Then index it (slow) - this blocks until complete for legacy compatibility
   return indexLargeDocumentInBackground(metadata.id, file, onProgress);
 }
 
-/**
- * Upload a large document from text content (for pre-parsed PDFs).
- */
 export async function uploadLargeDocumentFromText(
   filename: string,
   content: string,
   mimeType: string = "text/plain",
   description?: string,
-  onProgress?: (progress: IndexingProgress) => void
+  onProgress?: (progress: IndexingProgress) => void,
 ): Promise<LargeDocumentMetadata> {
-  // Create a File-like object for the upload function
   const blob = new Blob([content], { type: mimeType });
   const file = new File([blob], filename, { type: mimeType });
   return uploadLargeDocument(file, description, onProgress);
 }
 
 /**
- * Delete a large document and all its chunks.
+ * Detect documents whose indexing was interrupted (tab closed, crash)
+ * and flip them to `error` so they can be retried. Returns the count of
+ * documents recovered. Called once on app boot from the
+ * large-document-browser mount effect — single source of truth.
  */
+export async function recoverInterruptedDocuments(
+  staleAfterMs: number = 5 * 60_000,
+): Promise<number> {
+  const db = await getLargeDocumentsDb();
+  const docs = await db.getAll("documents");
+  const now = Date.now();
+  let recovered = 0;
+  for (const doc of docs) {
+    if (
+      (doc.status === "extracting" || doc.status === "embedding") &&
+      now - doc.uploadedAt > staleAfterMs
+    ) {
+      doc.status = "error";
+      doc.errorMessage = "Indexing was interrupted";
+      await db.put("documents", doc);
+      recovered++;
+    }
+  }
+  if (recovered > 0) {
+    console.log(`[LargeDocs] Recovered ${recovered} interrupted documents`);
+  }
+  return recovered;
+}
+
 export async function deleteLargeDocument(documentId: string): Promise<void> {
   const db = await getLargeDocumentsDb();
 
-  // Delete all chunks for this document
   const chunks = await db.getAllFromIndex("chunks", "by-document", documentId);
   const chunkTx = db.transaction("chunks", "readwrite");
   for (const chunk of chunks) {
@@ -566,117 +883,68 @@ export async function deleteLargeDocument(documentId: string): Promise<void> {
   }
   await chunkTx.done;
 
-  // Delete the document metadata
   await db.delete("documents", documentId);
-
-  // Delete the original file data
   await deleteDocumentFile(documentId);
-
-  // Remove cached UMAP projection for this document
   await removeDocumentUmapCache(documentId);
+  await deleteCachedExtractionsForDocument(documentId);
 }
 
-/**
- * Get the original file data for viewing a document.
- */
 export async function getLargeDocumentFile(
-  documentId: string
+  documentId: string,
 ): Promise<LargeDocumentFile | undefined> {
   return getDocumentFile(documentId);
 }
 
-/**
- * Load document content by reconstructing from stored chunks.
- * Used for text viewer when original file isn't needed.
- */
 export async function loadDocumentContent(documentId: string): Promise<string> {
   const db = await getLargeDocumentsDb();
   const chunks = await db.getAllFromIndex("chunks", "by-document", documentId);
-  
-  // Sort by chunk index
-  chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
-  
-  // Reconstruct content (note: this won't perfectly restore original due to chunking overlap)
-  return chunks.map(c => c.chunkText).join("\n\n");
+  // Sort by page first (chunkIndex is now write-order due to interleaved
+  // indexing, so it no longer reflects document position). Use chunkIndex
+  // as a secondary key to keep chunks within the same page in a stable order.
+  chunks.sort((a, b) => a.pageStart - b.pageStart || a.chunkIndex - b.chunkIndex);
+  return chunks.map((c) => c.chunkText).join("\n\n");
 }
 
-/**
- * Rename a large document.
- */
 export async function renameLargeDocument(
   documentId: string,
-  newFilename: string
+  newFilename: string,
 ): Promise<LargeDocumentMetadata | undefined> {
   const db = await getLargeDocumentsDb();
-
   const doc = await db.get("documents", documentId);
-  if (!doc) {
-    return undefined;
-  }
-
-  // Update the filename
+  if (!doc) return undefined;
   doc.filename = newFilename.trim();
   await db.put("documents", doc);
-
   return doc;
 }
 
-/**
- * Get all uploaded documents.
- */
 export async function getAllLargeDocuments(): Promise<LargeDocumentMetadata[]> {
   const db = await getLargeDocumentsDb();
   return db.getAll("documents");
 }
 
-/**
- * Get a single document by ID.
- */
 export async function getLargeDocument(
-  documentId: string
+  documentId: string,
 ): Promise<LargeDocumentMetadata | undefined> {
   const db = await getLargeDocumentsDb();
   return db.get("documents", documentId);
 }
 
-/**
- * Compute RRF score from ranks.
- * RRF(d) = Σ 1/(k + rank(d))
- */
 function computeRRFScore(
   semanticRank: number | null,
   lexicalRank: number | null,
-  k: number = 60
+  k: number = 60,
 ): number {
   let score = 0;
-  if (semanticRank !== null) {
-    score += 1 / (k + semanticRank);
-  }
-  if (lexicalRank !== null) {
-    score += 1 / (k + lexicalRank);
-  }
+  if (semanticRank !== null) score += 1 / (k + semanticRank);
+  if (lexicalRank !== null) score += 1 / (k + lexicalRank);
   return score;
 }
 
-/**
- * Search across all large documents using hybrid search (lexical + semantic + RRF).
- *
- * This is the core RAG search function that Claude will use.
- *
- * Optimized pipeline (loads chunks per-document to bound memory):
- * 1. Get list of ready documents
- * 2. For each document, load its chunks via the by-document index
- * 3. Run lexical + semantic search per document, collect all scored candidates
- * 4. Compute global RRF fusion scores across all candidates
- * 5. (Optional) Rerank top candidates with cross-encoder for better accuracy
- * 6. Return final results with matched terms
- */
 export async function searchLargeDocuments(
   query: string,
   topKOrOptions: number | LargeDocumentSearchOptions = 10,
-  threshold: number = 0.3
+  threshold: number = 0.3,
 ): Promise<LargeDocumentSearchResult[]> {
-  // Support both legacy (topK, threshold) and new (options) signatures
   const options: LargeDocumentSearchOptions =
     typeof topKOrOptions === "number"
       ? { topK: topKOrOptions, threshold }
@@ -687,27 +955,26 @@ export async function searchLargeDocuments(
     threshold: minThreshold = 0.3,
     rerank: enableRerank,
     rerankerBackend,
-    retrieveK = 50, // Retrieve more candidates when reranking
+    retrieveK = 50,
     includeBreakdown = false,
     rrfK = 60,
   } = options;
 
   const db = await getLargeDocumentsDb();
-
-  // Get all ready documents
   const allDocs = await db.getAll("documents");
-  const readyDocs = allDocs.filter((d) => d.status === "ready");
+  // Include "embedding" as well so a large document becomes incrementally
+  // searchable as soon as its first batch of chunks is committed — users
+  // shouldn't have to wait for full transcription/indexing before RAG works.
+  const readyDocs = allDocs.filter(
+    (d) => d.status === "ready" || d.status === "embedding",
+  );
   if (readyDocs.length === 0) return [];
 
   const docMap = new Map<string, LargeDocumentMetadata>();
-  for (const doc of readyDocs) {
-    docMap.set(doc.id, doc);
-  }
+  for (const doc of readyDocs) docMap.set(doc.id, doc);
 
-  // Detect query type
   const queryType = detectQueryType(query);
 
-  // Embed the query upfront (needed for all documents)
   let queryEmbedding: number[] | null = null;
   try {
     queryEmbedding = await embedQuery(query);
@@ -715,9 +982,6 @@ export async function searchLargeDocuments(
     console.error("[LargeDocs] Failed to embed query, using lexical-only:", error);
   }
 
-  // Collect scored candidates across all documents.
-  // We load chunks per-document via the by-document index to avoid loading
-  // the entire chunks store into memory at once.
   type ScoredCandidate = {
     chunk: LargeDocumentChunk;
     semanticScore: number;
@@ -730,22 +994,15 @@ export async function searchLargeDocuments(
     const chunks = await db.getAllFromIndex("chunks", "by-document", doc.id);
     if (chunks.length === 0) continue;
 
-    // Lexical search for this document's chunks
     const lexicalResults = largeDocLexicalSearch(query, chunks);
     const lexicalScoresMap = new Map<string, LargeDocLexicalResult>();
-    for (const r of lexicalResults) {
-      lexicalScoresMap.set(r.chunk.id, r);
-    }
+    for (const r of lexicalResults) lexicalScoresMap.set(r.chunk.id, r);
 
-    // Semantic scoring for this document's chunks
     for (const chunk of chunks) {
       const semanticScore = queryEmbedding
         ? cosineSimilarity(queryEmbedding, chunk.embedding)
         : 0;
       const lexicalResult = lexicalScoresMap.get(chunk.id);
-
-      // Early filter: skip chunks below threshold that also have no lexical match.
-      // This avoids accumulating thousands of irrelevant candidates.
       if (semanticScore < minThreshold && !lexicalResult) continue;
 
       allCandidates.push({
@@ -759,7 +1016,6 @@ export async function searchLargeDocuments(
 
   if (allCandidates.length === 0) return [];
 
-  // If we only have lexical results (embedding failed), sort by lexical score
   if (!queryEmbedding) {
     allCandidates.sort((a, b) => b.lexicalScore - a.lexicalScore);
     return allCandidates.slice(0, topK).map((r) => {
@@ -771,20 +1027,20 @@ export async function searchLargeDocuments(
         headingPath: r.chunk.headingPath,
         score: r.lexicalScore,
         chunkIndex: r.chunk.chunkIndex,
+        pageStart: r.chunk.pageStart,
+        pageEnd: r.chunk.pageEnd,
         matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
         queryType: includeBreakdown ? queryType : undefined,
       };
     });
   }
 
-  // Sort candidates by semantic score to assign semantic ranks
   allCandidates.sort((a, b) => b.semanticScore - a.semanticScore);
   const semanticRanks = new Map<string, number>();
   allCandidates.forEach((item, index) => {
     semanticRanks.set(item.chunk.id, index + 1);
   });
 
-  // Sort candidates by lexical score to assign lexical ranks (only those with a score)
   const lexicalCandidates = allCandidates
     .filter((c) => c.lexicalScore > 0)
     .sort((a, b) => b.lexicalScore - a.lexicalScore);
@@ -793,31 +1049,25 @@ export async function searchLargeDocuments(
     lexicalRanks.set(item.chunk.id, index + 1);
   });
 
-  // Compute RRF scores
   const rrfScored = allCandidates.map((c) => ({
     ...c,
     rrfScore: computeRRFScore(
       semanticRanks.get(c.chunk.id) ?? null,
       lexicalRanks.get(c.chunk.id) ?? null,
-      rrfK
+      rrfK,
     ),
   }));
 
-  // Sort by RRF score
   rrfScored.sort((a, b) => b.rrfScore - a.rrfScore);
 
-  // Determine if we should rerank
   const shouldRerank = enableRerank ?? (getRecommendedReranker() !== "none");
   const candidateCount = shouldRerank ? retrieveK : topK;
-
-  // Get candidates and filter by semantic threshold
   const filtered = rrfScored
     .slice(0, candidateCount)
     .filter((r) => r.semanticScore >= minThreshold);
 
   if (filtered.length === 0) return [];
 
-  // Apply reranking if enabled
   if (shouldRerank && filtered.length > 1) {
     const rerankDocs: RerankDocument[] = filtered.map((r) => ({
       id: r.chunk.id,
@@ -830,6 +1080,8 @@ export async function searchLargeDocuments(
         semanticScore: r.semanticScore,
         lexicalScore: r.lexicalScore,
         matchedTerms: r.matchedTerms,
+        pageStart: r.chunk.pageStart,
+        pageEnd: r.chunk.pageEnd,
       },
     }));
 
@@ -847,6 +1099,8 @@ export async function searchLargeDocuments(
           semanticScore: number;
           lexicalScore: number;
           matchedTerms: string[];
+          pageStart: number;
+          pageEnd: number;
         };
         const doc = docMap.get(meta.documentId);
         return {
@@ -856,6 +1110,8 @@ export async function searchLargeDocuments(
           headingPath: meta.headingPath,
           score: Math.round(r.relevanceScore * 100) / 100,
           chunkIndex: meta.chunkIndex,
+          pageStart: meta.pageStart,
+          pageEnd: meta.pageEnd,
           reranked: true,
           matchedTerms: includeBreakdown ? meta.matchedTerms : undefined,
           queryType: includeBreakdown ? queryType : undefined,
@@ -866,7 +1122,6 @@ export async function searchLargeDocuments(
     }
   }
 
-  // Return results without reranking (take topK)
   return filtered.slice(0, topK).map((r) => {
     const doc = docMap.get(r.chunk.documentId);
     return {
@@ -876,6 +1131,8 @@ export async function searchLargeDocuments(
       headingPath: r.chunk.headingPath,
       score: Math.round(r.semanticScore * 100) / 100,
       chunkIndex: r.chunk.chunkIndex,
+      pageStart: r.chunk.pageStart,
+      pageEnd: r.chunk.pageEnd,
       reranked: false,
       matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
       queryType: includeBreakdown ? queryType : undefined,
@@ -883,16 +1140,12 @@ export async function searchLargeDocuments(
   });
 }
 
-/**
- * Search a specific document only using hybrid search.
- */
 export async function searchLargeDocument(
   documentId: string,
   query: string,
   topKOrOptions: number | LargeDocumentSearchOptions = 10,
-  threshold: number = 0.3
+  threshold: number = 0.3,
 ): Promise<LargeDocumentSearchResult[]> {
-  // Support both legacy and new signatures
   const options: LargeDocumentSearchOptions =
     typeof topKOrOptions === "number"
       ? { topK: topKOrOptions, threshold }
@@ -909,21 +1162,12 @@ export async function searchLargeDocument(
   } = options;
 
   const db = await getLargeDocumentsDb();
-
-  // Get chunks for this document only
   const chunks = await db.getAllFromIndex("chunks", "by-document", documentId);
+  if (chunks.length === 0) return [];
 
-  if (chunks.length === 0) {
-    return [];
-  }
-
-  // Get document metadata
   const doc = await db.get("documents", documentId);
-
-  // Detect query type
   const queryType = detectQueryType(query);
 
-  // Run lexical search on this document's chunks
   const lexicalResults = largeDocLexicalSearch(query, chunks);
   const lexicalRanks = new Map<string, number>();
   const lexicalScoresMap = new Map<string, LargeDocLexicalResult>();
@@ -932,13 +1176,11 @@ export async function searchLargeDocument(
     lexicalScoresMap.set(result.chunk.id, result);
   });
 
-  // Embed the query
   let queryEmbedding: number[];
   try {
     queryEmbedding = await embedQuery(query);
   } catch (error) {
     console.error("[LargeDocs] Failed to embed query:", error);
-    // Fall back to lexical-only
     return lexicalResults.slice(0, topK).map((r) => ({
       documentId,
       filename: doc?.filename || "Unknown Document",
@@ -946,12 +1188,13 @@ export async function searchLargeDocument(
       headingPath: r.chunk.headingPath,
       score: r.lexicalScore,
       chunkIndex: r.chunk.chunkIndex,
+      pageStart: r.chunk.pageStart,
+      pageEnd: r.chunk.pageEnd,
       matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
       queryType: includeBreakdown ? queryType : undefined,
     }));
   }
 
-  // Compute semantic scores and ranks
   const semanticScored: Array<{ chunk: LargeDocumentChunk; score: number }> = [];
   for (const chunk of chunks) {
     const similarity = cosineSimilarity(queryEmbedding, chunk.embedding);
@@ -966,7 +1209,6 @@ export async function searchLargeDocument(
     rawSemanticScores.set(item.chunk.id, item.score);
   });
 
-  // Combine using RRF
   const combinedResults: Array<{
     chunk: LargeDocumentChunk;
     rrfScore: number;
@@ -995,22 +1237,14 @@ export async function searchLargeDocument(
     });
   }
 
-  // Sort by RRF score
   combinedResults.sort((a, b) => b.rrfScore - a.rrfScore);
 
-  // Determine if we should rerank
   const shouldRerank = enableRerank ?? (getRecommendedReranker() !== "none");
   const candidateCount = shouldRerank ? retrieveK : topK;
   const candidates = combinedResults.slice(0, candidateCount);
-
-  // Filter by semantic threshold
   const filtered = candidates.filter((r) => r.semanticScore >= minThreshold);
+  if (filtered.length === 0) return [];
 
-  if (filtered.length === 0) {
-    return [];
-  }
-
-  // Apply reranking if enabled
   if (shouldRerank && filtered.length > 1) {
     const rerankDocs: RerankDocument[] = filtered.map((r) => ({
       id: r.chunk.id,
@@ -1022,6 +1256,8 @@ export async function searchLargeDocument(
         semanticScore: r.semanticScore,
         lexicalScore: r.lexicalScore,
         matchedTerms: r.matchedTerms,
+        pageStart: r.chunk.pageStart,
+        pageEnd: r.chunk.pageEnd,
       },
     }));
 
@@ -1036,6 +1272,8 @@ export async function searchLargeDocument(
           chunkIndex: number;
           headingPath: string;
           matchedTerms: string[];
+          pageStart: number;
+          pageEnd: number;
         };
         return {
           documentId,
@@ -1044,6 +1282,8 @@ export async function searchLargeDocument(
           headingPath: meta.headingPath,
           score: Math.round(r.relevanceScore * 100) / 100,
           chunkIndex: meta.chunkIndex,
+          pageStart: meta.pageStart,
+          pageEnd: meta.pageEnd,
           reranked: true,
           matchedTerms: includeBreakdown ? meta.matchedTerms : undefined,
           queryType: includeBreakdown ? queryType : undefined,
@@ -1051,11 +1291,9 @@ export async function searchLargeDocument(
       });
     } catch (error) {
       console.error("[LargeDocs] Reranking failed:", error);
-      // Fall through to non-reranked results
     }
   }
 
-  // Return results without reranking
   return filtered.slice(0, topK).map((r) => ({
     documentId,
     filename: doc?.filename || "Unknown Document",
@@ -1063,15 +1301,14 @@ export async function searchLargeDocument(
     headingPath: r.chunk.headingPath,
     score: Math.round(r.semanticScore * 100) / 100,
     chunkIndex: r.chunk.chunkIndex,
+    pageStart: r.chunk.pageStart,
+    pageEnd: r.chunk.pageEnd,
     reranked: false,
     matchedTerms: includeBreakdown ? r.matchedTerms : undefined,
     queryType: includeBreakdown ? queryType : undefined,
   }));
 }
 
-/**
- * Get statistics about large documents.
- */
 export async function getLargeDocumentStats(): Promise<{
   totalDocuments: number;
   totalChunks: number;

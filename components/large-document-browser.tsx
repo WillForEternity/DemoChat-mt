@@ -31,7 +31,9 @@ import {
   deleteLargeDocument,
   renameLargeDocument,
   getAllLargeDocuments,
+  getLargeDocumentFile,
   searchLargeDocuments,
+  recoverInterruptedDocuments,
   type LargeDocumentMetadata,
   type LargeDocumentSearchResult,
   type IndexingProgress,
@@ -75,6 +77,7 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
   const [editingDocId, setEditingDocId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [viewerDocument, setViewerDocument] = useState<LargeDocumentMetadata | null>(null);
+  const [viewerInitialPage, setViewerInitialPage] = useState<number | undefined>(undefined);
   
   // Drag and drop state
   const [isDragging, setIsDragging] = useState(false);
@@ -82,12 +85,24 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
 
-  // Load documents on mount
+  // Load documents on mount.
+  // The first load also performs Phase 6 boot recovery: any document
+  // stuck in `extracting` or `embedding` for more than 5 minutes is
+  // flipped to `error` so the user can retry. Single source of truth —
+  // colocated here, not in `app/page.tsx`, to avoid races with the loader.
+  const hasRecoveredRef = useRef(false);
   const loadDocuments = useCallback(async () => {
     try {
       setIsLoading(true);
+      if (!hasRecoveredRef.current) {
+        hasRecoveredRef.current = true;
+        try {
+          await recoverInterruptedDocuments();
+        } catch (err) {
+          console.error("[LargeDocs] Boot recovery failed:", err);
+        }
+      }
       const docs = await getAllLargeDocuments();
-      // Sort by upload date, newest first
       docs.sort((a, b) => b.uploadedAt - a.uploadedAt);
       setDocuments(docs);
       setError(null);
@@ -100,6 +115,49 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
 
   useEffect(() => {
     loadDocuments();
+  }, [loadDocuments]);
+
+  // Retry indexing for an errored document. Uses Phase 7's extraction
+  // cache so already-extracted pages aren't re-OCR'd.
+  const handleRetry = useCallback(async (doc: LargeDocumentMetadata) => {
+    try {
+      setError(null);
+      const stored = await getLargeDocumentFile(doc.id);
+      if (!stored) {
+        setError("Original file no longer available; please re-upload.");
+        return;
+      }
+      const blob = new Blob([stored.data], { type: stored.mimeType });
+      const file = new File([blob], doc.filename, { type: stored.mimeType });
+      setUploadProgress({ current: 0, total: 5, status: "parsing", message: "Retrying…" });
+      // Track the last status we refreshed for so we don't spam loadDocuments
+      // on every per-page progress tick — only on phase transitions.
+      let lastStatus: string | null = null;
+      indexLargeDocumentInBackground(doc.id, file, (progress) => {
+        try {
+          setUploadProgress(progress);
+          if (progress.status !== lastStatus) {
+            lastStatus = progress.status;
+            // Refresh on phase transitions so the UI moves out of the prior
+            // "error" state as soon as extraction starts, and reflects each
+            // pdfjs/ai/embedding/complete step in real time.
+            loadDocuments();
+          }
+          if (progress.status === "complete" || progress.status === "error") {
+            setUploadProgress(null);
+            loadDocuments();
+          }
+        } catch {
+          // unmounted
+        }
+      }).catch(() => {
+        setUploadProgress(null);
+        loadDocuments();
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Retry failed");
+      setUploadProgress(null);
+    }
   }, [loadDocuments]);
 
   // Validate file before upload
@@ -148,8 +206,8 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
     try {
       setError(null);
       setUploadProgress({ current: 0, total: 5, status: "parsing", message: "Storing document..." });
-      
-      // Store the file first (fast operation)
+
+      // Store the file first (fast operation). Status begins as `stored`.
       const { metadata } = await storeLargeDocument(file);
       
       // Refresh document list to show the new document immediately
@@ -159,10 +217,17 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
       // The indexing process handles its own error recovery and status updates
       // Note: The indexing will complete even if the user navigates away -
       // it writes directly to IndexedDB which persists independently
+      let lastStatus: string | null = null;
       indexLargeDocumentInBackground(metadata.id, file, (progress) => {
         // Safe state updates - if component unmounted, these just fail silently
         try {
           setUploadProgress(progress);
+          if (progress.status !== lastStatus) {
+            lastStatus = progress.status;
+            // Refresh on phase transitions so the row's status badge / chunk
+            // count update live (extracting → embedding → ready).
+            loadDocuments();
+          }
           if (progress.status === "complete" || progress.status === "error") {
             setUploadProgress(null);
             // Refresh to show updated status
@@ -441,9 +506,16 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
           ) : (
             <div className="space-y-2">
               {searchResults.map((result, idx) => (
-                <div
+                <button
                   key={`${result.documentId}-${result.chunkIndex}-${idx}`}
-                  className="p-3 bg-white dark:bg-neutral-800 rounded-lg border border-gray-200 dark:border-neutral-700"
+                  onClick={() => {
+                    const doc = documents.find((d) => d.id === result.documentId);
+                    if (doc) {
+                      setViewerInitialPage(result.pageStart);
+                      setViewerDocument(doc);
+                    }
+                  }}
+                  className="w-full text-left p-3 bg-white dark:bg-neutral-800 rounded-lg border border-gray-200 dark:border-neutral-700 hover:border-blue-400 dark:hover:border-blue-500 transition-colors"
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-gray-700 dark:text-neutral-300 truncate">
@@ -453,15 +525,23 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
                       {(result.score * 100).toFixed(0)}%
                     </span>
                   </div>
-                  {result.headingPath && (
-                    <p className="text-xs text-gray-500 dark:text-neutral-500 mb-1">
-                      {result.headingPath}
-                    </p>
-                  )}
+                  <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-neutral-500 mb-1">
+                    <span className="font-mono text-gray-600 dark:text-neutral-400">
+                      {result.pageStart === result.pageEnd
+                        ? `p. ${result.pageStart}`
+                        : `pp. ${result.pageStart}–${result.pageEnd}`}
+                    </span>
+                    {result.headingPath && (
+                      <>
+                        <span className="text-gray-300 dark:text-neutral-600">•</span>
+                        <span className="truncate">{result.headingPath}</span>
+                      </>
+                    )}
+                  </div>
                   <p className="text-xs text-gray-600 dark:text-neutral-400 line-clamp-3">
                     {result.chunkText}
                   </p>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -539,15 +619,22 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
                           {doc.status === "error" && (
                             <AlertCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
                           )}
-                          {(doc.status === "indexing" || doc.status === "uploading") && (
+                          {doc.status !== "ready" && doc.status !== "error" && (
                             <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin flex-shrink-0" />
                           )}
                           {/* Action buttons - compact */}
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0">
-                            {/* Allow viewing during indexing/uploading for PDFs (file is stored first) */}
-                            {(doc.status === "ready" || doc.status === "indexing" || doc.status === "uploading") && (
+                            {/* Allow viewing as long as the file is on disk (any status
+                                except "error"). Mirrors the doc-list filter in
+                                document-viewer/index.tsx so legacy/unknown statuses
+                                — e.g. pre-Phase-6 "uploading"/"indexing" rows — still
+                                get a view button. */}
+                            {doc.status !== "error" && (
                               <button
-                                onClick={() => setViewerDocument(doc)}
+                                onClick={() => {
+                                  setViewerInitialPage(undefined);
+                                  setViewerDocument(doc);
+                                }}
                                 className="p-1 text-gray-400 hover:text-emerald-500 rounded hover:bg-emerald-50 dark:hover:bg-emerald-900/20"
                                 title={doc.status === "ready" ? "View document" : "View document (still indexing for search)"}
                               >
@@ -576,8 +663,19 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
                           <span className="text-gray-300 dark:text-neutral-600">•</span>
                           <span>{doc.chunkCount} chunks</span>
                         </div>
-                        {doc.status === "error" && doc.errorMessage && (
-                          <p className="text-xs text-red-500 mt-1 ml-8">{doc.errorMessage}</p>
+                        {doc.status === "error" && (
+                          <div className="mt-1 ml-8 flex items-center gap-2 flex-wrap">
+                            {doc.errorMessage && (
+                              <p className="text-xs text-red-500">{doc.errorMessage}</p>
+                            )}
+                            <button
+                              onClick={() => handleRetry(doc)}
+                              className="text-xs text-blue-600 dark:text-blue-400 underline hover:no-underline"
+                              title="Retry indexing (resumes from cached pages)"
+                            >
+                              Retry indexing
+                            </button>
+                          </div>
                         )}
                       </>
                     )}
@@ -601,7 +699,11 @@ export function LargeDocumentBrowser({ className }: LargeDocumentBrowserProps) {
       {viewerDocument && (
         <DocumentViewer
           document={viewerDocument}
-          onClose={() => setViewerDocument(null)}
+          initialPage={viewerInitialPage}
+          onClose={() => {
+            setViewerDocument(null);
+            setViewerInitialPage(undefined);
+          }}
         />
       )}
     </div>
